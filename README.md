@@ -15,7 +15,7 @@ JDT LS gives editors and agents Java code intelligence: compile errors as you ty
 
 ## What it provides
 
-- **An installer** that downloads an official Eclipse JDT LS release, never a snapshot or milestone, from Eclipse, and verifies it before use. This project never repackages or redistributes Eclipse's files.
+- **An installer** that downloads an official Eclipse JDT LS release, never a snapshot, from Eclipse, and verifies it before use. This project never repackages or redistributes Eclipse's files.
 - **A launcher that drop-in replaces `jdtls`.** It starts the verified release with a small Java agent that keeps each worktree's projects separate inside one server.
 - **Releases that pin a tested combination:** one JDT LS version and the agent, tested together.
 
