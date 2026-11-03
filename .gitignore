@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+.venv/
+.cache/
+__pycache__/
+.pytest_cache/
+build/
+dist/
+target/
+compose/.env
+mise.local.toml
+
+# Eclipse metadata, at any depth: JDT LS runs on this checkout too.
+.project
+.classpath
+.settings/
+.factorypath
+
+# The governor's cross-agent review files.
+**/*_agent_review.md
+
+# (planned, with Fractal Agent Tools)
+# .context/pipeline/
+# .agents/skills/fractal-agent-*

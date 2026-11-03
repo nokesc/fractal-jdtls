@@ -1,0 +1,477 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""Start JDT LS from this Fractal JDT LS install, always with the agent (design §5).
+
+A drop-in for Eclipse's stock ``bin/jdtls``:
+
+    <root>/<release>/bin/jdtls [--java-executable JAVA] [--jvm-arg=OPTION ...]
+                               [-data DIR] [JDT LS arguments ...]
+
+It builds the stock ``java`` command (the Equinox launcher, the install's read-only
+shared configuration, ``--add-opens``), adds the agent and the boot helper's boot
+delegation, and replaces itself with ``java``, so the LSP client's stdin and stdout
+connect straight to JDT LS. Before that it:
+
+- verifies the install against ``pin.json`` and ``release-files.json``, exactly as
+  ``install.py --verify`` does, and refuses to start if anything is missing, extra or
+  changed;
+- finds Java (``--java-executable``, else ``$JAVA_HOME/bin/java``, else ``java`` on
+  ``PATH``) and checks it meets the pin's minimum; ``--validate-java-version`` and
+  ``--no-validate-java-version`` are accepted for compatibility with the stock launcher,
+  and the minimum is always checked;
+- defaults ``-data`` to ``${XDG_CACHE_HOME:-~/.cache}/fractal-jdtls/ws/<sha1 of the
+  canonical working directory>``; a client's ``-data`` is passed on unchanged, as the
+  stock launcher does, whether a folder or a ``file:`` URL;
+- passes a writable ``-configuration`` inside ``-data``,
+  ``<data>/.fractal-jdtls/<release>/configuration``, unless the client passes its own;
+- refuses a ``-data`` or ``-configuration`` inside the install, reading each value the
+  way Equinox does (``equinox_location``), and Equinox's ``@`` locations and URLs other
+  than ``file:``, which it can't check;
+- merges a client's ``-Dorg.osgi.framework.bootdelegation=...`` (the last one, which
+  the JVM would use) with the boot helper's package into one property.
+
+It writes only to stderr (stdout is the LSP stream) and writes nothing into the
+install, not even Python bytecode.
+
+Standard library only, Python 3.10 or newer.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import urllib.parse
+from pathlib import Path
+
+AGENT_JAR = "lib/fractal-jdtls-agent.jar"
+BOOT_PACKAGE = "org.fractal.jdtls.boot"
+BOOTDELEGATION = "-Dorg.osgi.framework.bootdelegation"
+ECLIPSE_DIR = "eclipse"
+SHARED_CONFIGURATION = "config_linux"  # the stock launcher's choice on Linux
+LAUNCHER_JAR_RE = re.compile(r"^plugins/org\.eclipse\.equinox\.launcher(?:_[^/]*)?\.jar$")
+JAVA_VERSION_RE = re.compile(r'version "(\d+)(?:\.(\d+))?')
+XML_LIMITS_FROM = 24  # the stock launcher lifts these JAXP limits from Java 24 on
+XML_LIMITS = ["-Djdk.xml.maxGeneralEntitySizeLimit=0", "-Djdk.xml.totalEntitySizeLimit=0"]
+STOCK_OPTIONS = [
+    "-Declipse.application=org.eclipse.jdt.ls.core.id1",
+    "-Dosgi.bundles.defaultStartLevel=4",
+    "-Declipse.product=org.eclipse.jdt.ls.core.product",
+    "-Dosgi.checkConfiguration=true",
+    "-Dosgi.sharedConfiguration.area={shared}",
+    "-Dosgi.sharedConfiguration.area.readOnly=true",
+    "-Dosgi.configuration.cascaded=true",
+    "-Xms1G",
+    "--add-modules=ALL-SYSTEM",
+    "--add-opens", "java.base/java.util=ALL-UNNAMED",
+    "--add-opens", "java.base/java.lang=ALL-UNNAMED",
+]  # fmt: skip
+USAGE = """\
+usage: jdtls [--java-executable JAVA] [--jvm-arg=OPTION ...] [-data DIR] [JDT LS arguments ...]
+
+Start JDT LS from this Fractal JDT LS install, with the agent that keeps Git
+worktrees' Maven projects apart. A drop-in for Eclipse's stock bin/jdtls.
+
+  --java-executable JAVA  the java to run (default: $JAVA_HOME/bin/java, else java on PATH)
+  --jvm-arg=OPTION        an extra JVM option; repeatable
+  -data DIR               the JDT LS workspace, a folder or a file: URL (default:
+                          ${XDG_CACHE_HOME:-~/.cache}/fractal-jdtls/ws/<sha1 of the working directory>)
+
+Every other argument is passed to JDT LS. Without -configuration, the configuration
+area is <data>/.fractal-jdtls/<release>/configuration. Neither -data nor -configuration
+may be inside the install.
+"""
+
+
+class LaunchError(Exception):
+    """A failure the user can act on; the message says what failed and what to do."""
+
+
+class UsageError(LaunchError):
+    pass
+
+
+# --- the command line --------------------------------------------------------------
+
+
+class Args:
+    def __init__(self) -> None:
+        self.java_executable: str | None = None
+        self.jvm_args: list[str] = []
+        self.data: str | None = None
+        self.passthrough: list[str] = []
+        self.help = False
+
+
+def parse_args(argv: list[str]) -> Args:
+    """The stock launcher's options; everything else goes to JDT LS, in order."""
+    args = Args()
+    i = 0
+
+    def value(option: str, arg: str) -> str:
+        nonlocal i
+        if arg.startswith(option + "="):
+            return arg[len(option) + 1 :]
+        if i + 1 >= len(argv):
+            raise UsageError(f"{option} needs a value")
+        i += 1
+        return argv[i]
+
+    while i < len(argv):
+        arg = argv[i]
+        name = arg.split("=", 1)[0]
+        if arg in ("-h", "--help"):
+            args.help = True
+        elif name == "--java-executable":
+            args.java_executable = value(name, arg)
+        elif name == "--jvm-arg":
+            args.jvm_args.append(value(name, arg))
+        elif name == "-data":
+            args.data = value(name, arg)
+        elif arg in ("--validate-java-version", "--no-validate-java-version"):
+            pass  # accepted for compatibility; the minimum is always checked (design §5)
+        else:
+            args.passthrough.append(arg)
+        i += 1
+    return args
+
+
+# --- the install -------------------------------------------------------------------
+
+
+def sha256_of(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        while chunk := stream.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_installer(release_dir: Path):
+    """Import this install's install.py, once its own hash checks out, without bytecode."""
+    path = release_dir / "bin" / "install.py"
+    record = release_dir / "release-files.json"
+    damaged = f"The install is damaged: delete {release_dir} and run install.py from the unzipped release again."
+    try:
+        expected = json.loads(record.read_text(encoding="utf-8"))["files"]["bin/install.py"]
+        actual = sha256_of(path)
+    except FileNotFoundError as error:
+        raise LaunchError(f"{error.filename} is missing. {damaged}") from None
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise LaunchError(f"{record} can't be read ({error!r}). {damaged}") from None
+    if actual != expected:
+        raise LaunchError(f"{path} doesn't match {record}. {damaged}")
+    spec = importlib.util.spec_from_file_location("fractal_jdtls_install", path)
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True  # no __pycache__ inside the install (design §5)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
+    return module
+
+
+class Install:
+    """A verified install: <root>/<release>/ (design §2)."""
+
+    def __init__(self, release_dir: Path):
+        installer = load_installer(release_dir)
+        self.release_dir = release_dir
+        try:
+            pin = installer.Pin(release_dir / "pin.json")
+            if release_dir.name != pin.release:
+                raise LaunchError(
+                    f"{release_dir} isn't an install of fractal-jdtls {pin.release}: bin/jdtls runs only from "
+                    f"<root>/{pin.release}/. Run {release_dir / 'bin' / 'install.py'} to install it, then run "
+                    f"<root>/{pin.release}/bin/jdtls."
+                )
+            remedy = f"The install is damaged: delete {release_dir} and run install.py from the unzipped release again."
+            release_files = installer.ReleaseFiles(release_dir / installer.RELEASE_FILES_JSON, pin, remedy)
+            report = installer.verify(release_dir, pin, release_files)
+        except installer.InstallError as error:
+            raise LaunchError(str(error)) from None
+        if report:
+            count = report.count()
+            raise LaunchError(
+                f"{release_dir} fails verification ({count} problem{'' if count == 1 else 's'}), "
+                "so JDT LS wasn't started:\n"
+                + "\n".join(report.lines())
+                + f"\nNothing may change inside an install. To reinstall, delete {release_dir} and run "
+                "install.py from the unzipped release again."
+            )
+        self.release = pin.release
+        self.jdtls_version = pin.jdtls_version
+        try:
+            self.java_minimum = int(json.loads((release_dir / "pin.json").read_text(encoding="utf-8"))["java"]["minimum"])
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise LaunchError(f"{release_dir / 'pin.json'} has no valid java.minimum ({error!r}).") from None
+        launchers = sorted(name for name in pin.eclipse_files if LAUNCHER_JAR_RE.match(name))
+        plain = [name for name in launchers if name == "plugins/org.eclipse.equinox.launcher.jar"]
+        launchers = plain or launchers  # the stock launcher prefers the unversioned name
+        if len(launchers) != 1:
+            raise LaunchError(f"{release_dir / 'pin.json'} pins {len(launchers)} Equinox launcher jars, not one.")
+        self.eclipse = release_dir / ECLIPSE_DIR
+        self.launcher_jar = self.eclipse / launchers[0]
+
+
+# --- Java --------------------------------------------------------------------------
+
+
+def find_java(flag: str | None, environ) -> tuple[str, str]:
+    """The java to run and where it came from: the stock order (design §5)."""
+    if flag is not None:
+        candidate, source = flag, "--java-executable"
+    else:
+        java_home = environ.get("JAVA_HOME", "")
+        home_java = Path(java_home, "bin", "java") if java_home else None
+        if home_java is not None and home_java.is_file():
+            candidate, source = str(home_java), "JAVA_HOME"
+        else:
+            candidate, source = "java", "PATH"
+    path = candidate if os.sep in candidate else shutil.which(candidate, path=environ.get("PATH", os.defpath))
+    if not path or not os.path.isfile(path) or not os.access(path, os.X_OK):
+        where = f"{candidate!r} from {source}" if source != "PATH" else "java on PATH"
+        raise LaunchError(
+            f"can't run {where}: no such executable file. Pass --java-executable, set JAVA_HOME, or put java on PATH."
+        )
+    return os.path.abspath(path), source
+
+
+def java_major_version(java: str, environ) -> int:
+    try:
+        result = subprocess.run(
+            [java, "-version"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # captured: nothing reaches the LSP stream
+            env=environ,
+            text=True,
+            errors="replace",
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise LaunchError(f"running {java} -version failed: {error}.") from None
+    match = JAVA_VERSION_RE.search(result.stdout)
+    if result.returncode != 0 or not match:
+        output = result.stdout.strip().replace("\n", "\n  ")
+        raise LaunchError(f"can't tell which Java {java} is: {java} -version printed\n  {output}")
+    major = int(match.group(1))
+    if major == 1 and match.group(2):  # 1.8 and older
+        major = int(match.group(2))
+    return major
+
+
+# --- folders -----------------------------------------------------------------------
+
+
+def cache_home(environ) -> Path:
+    value = environ.get("XDG_CACHE_HOME", "")
+    if not os.path.isabs(value):  # the XDG spec says to ignore a relative value
+        value = os.path.join(os.path.expanduser("~"), ".cache")
+    return Path(value)
+
+
+def default_data(cwd: str, environ) -> str:
+    """Keyed on the canonical full path, so same-named checkouts don't share a workspace."""
+    canonical = os.path.realpath(cwd)
+    return str(cache_home(environ) / "fractal-jdtls" / "ws" / hashlib.sha1(canonical.encode()).hexdigest())
+
+
+def configuration_area(data: str, release: str) -> str:
+    return os.path.join(data, ".fractal-jdtls", release, "configuration")
+
+
+# The JDK's own URL protocols: for any other "scheme:", java.net.URL fails and Equinox
+# reads the value as a file name.
+JDK_URL_SCHEMES = frozenset({"file", "ftp", "http", "https", "jar", "jrt", "mailto"})
+SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):")
+URI_PATH_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-!.~'()*;:@&=+$,/")
+ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}")
+
+
+def file_uri_path(spec: str) -> str | None:
+    """``new File(new URI(spec)).getPath()`` for a ``file:`` spec, or None where Java throws.
+
+    java.net.URI rejects a character outside its path set (a space, ``[``, a bad ``%``
+    escape); File(URI) rejects an opaque URI (``file:ws``) or an authority
+    (``file://host/x``). (A query or fragment is refused before this is called.)
+    """
+    rest = spec[len("file:") :]
+    for i, char in enumerate(rest):
+        if char == "%":
+            if not ESCAPE_RE.match(rest, i):
+                return None
+        elif char.isascii():
+            if char not in URI_PATH_CHARS:
+                return None  # includes ? and #: a query or fragment
+        elif not char.isprintable() or char.isspace():
+            return None
+    if not rest.startswith("/"):
+        return None
+    if rest.startswith("//"):
+        authority, _, path = rest[2:].partition("/")
+        if authority or not path:
+            return None
+        rest = "/" + path
+    return urllib.parse.unquote(rest)
+
+
+def equinox_location(option: str, spec: str, cwd: str) -> str:
+    """The folder Equinox makes of a -data or -configuration value.
+
+    Equinox 3.25's LocationHelper.buildURL: a ``file:`` spec is ``new File(new URI(spec))``,
+    or, where that throws, ``new File(spec.substring(5))``; any other spec that isn't a
+    URL is ``new File(spec)``. A relative file is relative to the JVM's working
+    directory, which is this process's.
+    """
+    if spec.startswith("@"):
+        raise UsageError(f"{option} {spec}: Equinox's @ locations aren't supported; pass a folder or a file: URL")
+    if spec.startswith("file:"):
+        if "?" in spec or "#" in spec:
+            # Equinox makes a file of the whole name, then a URL of the file, which splits
+            # the name there: which folder JDT LS then uses isn't clear.
+            raise UsageError(f"{option} {spec}: a file: URL with ? or # isn't supported; pass a folder")
+        path = file_uri_path(spec)
+        if path is None:
+            path = spec[len("file:") :]
+    else:
+        scheme = SCHEME_RE.match(spec)
+        if scheme and scheme.group(1).lower() == "file":
+            # Equinox reads this through java.net.URL instead, without decoding escapes.
+            raise UsageError(f"{option} {spec}: write the scheme in lower case, file:")
+        if scheme and scheme.group(1).lower() in JDK_URL_SCHEMES:
+            raise UsageError(f"{option} {spec}: only a folder or a file: URL is supported")
+        path = spec
+    path = re.sub(r"/{2,}", "/", os.path.join(cwd, path))  # as java.io.File normalizes
+    return path.rstrip("/") or "/"
+
+
+# --- the java command --------------------------------------------------------------
+
+
+def agent_options(install: Install, jvm_args: list[str]) -> tuple[list[str], list[str]]:
+    """The agent's options, and the client's JVM options without its boot delegation.
+
+    The client's boot delegation is merged into the one the agent needs, never replaced
+    (design §5): the last one wins, as it would in the JVM.
+    """
+    packages: list[str] = []
+    rest = []
+    for arg in jvm_args:
+        if arg == BOOTDELEGATION or arg.startswith(BOOTDELEGATION + "="):
+            packages = [p.strip() for p in arg[len(BOOTDELEGATION) + 1 :].split(",") if p.strip()]
+        else:
+            rest.append(arg)
+    if BOOT_PACKAGE not in packages:
+        packages.append(BOOT_PACKAGE)
+    agent = [f"-javaagent:{install.release_dir / AGENT_JAR}", f"{BOOTDELEGATION}={','.join(packages)}"]
+    return agent, rest
+
+
+def java_command(install: Install, java: str, major: int, args: Args, data: str, configuration: str | None) -> list[str]:
+    """The stock launcher's command, with the agent and a configuration area outside the install.
+
+    ``data`` is the -data value as passed on: the client's, unchanged, or the default.
+    """
+    shared = str(install.eclipse / SHARED_CONFIGURATION)
+    agent, jvm_args = agent_options(install, args.jvm_args)
+    command = [java]
+    if major >= XML_LIMITS_FROM:
+        command += XML_LIMITS
+    command += [option.format(shared=shared) for option in STOCK_OPTIONS]
+    command += agent + jvm_args
+    command += ["-jar", str(install.launcher_jar), "-data", data]
+    if configuration is not None:
+        command += ["-configuration", configuration]
+    return command + args.passthrough
+
+
+# --- main --------------------------------------------------------------------------
+
+
+def prepare(argv: list[str], release_dir: Path, environ, cwd: str) -> list[str]:
+    """Everything before exec: the verified install, Java, the folders and the command."""
+    args = parse_args(argv)
+    install = Install(release_dir)
+    java, source = find_java(args.java_executable, environ)
+    major = java_major_version(java, environ)
+    if major < install.java_minimum:
+        raise LaunchError(
+            f"fractal-jdtls {install.release} (JDT LS {install.jdtls_version}) needs Java {install.java_minimum} "
+            f"or newer, but {java} (from {source}) is Java {major}. Pass --java-executable with Java "
+            f"{install.java_minimum} or newer, or set JAVA_HOME to one."
+        )
+
+    # A client's -data goes to Equinox unchanged, as with the stock launcher; data is the
+    # folder Equinox will make of it.
+    data_arg = args.data if args.data is not None else default_data(cwd, environ)
+    data = equinox_location("-data", data_arg, cwd)
+    if is_within(data, release_dir):
+        raise UsageError(f"-data {data_arg} is inside the install {release_dir}; pass a folder outside it")
+    # A client's -configuration (Equinox uses the last) is checked the same way.
+    client_configurations = [
+        args.passthrough[i + 1]
+        for i, arg in enumerate(args.passthrough[:-1])
+        if arg == "-configuration"
+    ]
+    for spec in client_configurations:
+        if is_within(equinox_location("-configuration", spec, cwd), release_dir):
+            raise UsageError(
+                f"-configuration {spec} is inside the install {release_dir}; nothing may be written there, "
+                "so pass a folder outside it, or no -configuration"
+            )
+    configuration = None
+    if "-configuration" not in args.passthrough:
+        configuration = configuration_area(data, install.release)
+        try:
+            os.makedirs(configuration, exist_ok=True)
+        except OSError as error:
+            raise LaunchError(
+                f"can't create the configuration area {configuration}: {error.strerror}. Pass a writable -data."
+            ) from None
+    return java_command(install, java, major, args, data_arg, configuration)
+
+
+def is_within(path: str, folder: Path) -> bool:
+    path, folder_ = os.path.realpath(path), os.path.realpath(folder)
+    return path == folder_ or path.startswith(folder_ + os.sep)
+
+
+def main(argv=None, release_dir: Path | None = None, environ=None, cwd: str | None = None, execv=os.execv) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    environ = os.environ if environ is None else environ
+    release_dir = Path(os.path.realpath(release_dir or Path(__file__).resolve().parent.parent))
+    try:
+        if parse_args(argv).help:
+            sys.stderr.write(USAGE)
+            return 0
+        command = prepare(argv, release_dir, environ, cwd or os.getcwd())
+    except UsageError as error:
+        print(f"jdtls: error: {error}\n(jdtls --help shows the options)", file=sys.stderr)
+        return 2
+    except LaunchError as error:
+        print(f"jdtls: error: {error}", file=sys.stderr)
+        return 1
+    except OSError as error:
+        where = f"{error.filename}: " if error.filename else ""
+        print(f"jdtls: error: {where}{error.strerror or error}", file=sys.stderr)
+        return 1
+    sys.stderr.flush()
+    try:
+        execv(command[0], command)
+    except OSError as error:
+        print(f"jdtls: error: can't start {command[0]}: {error.strerror or error}", file=sys.stderr)
+        return 1
+    return 0  # only when execv is a test's stand-in
+
+
+if __name__ == "__main__":
+    sys.dont_write_bytecode = True  # nothing is written into the install (design §5)
+    sys.stdout = sys.stderr  # stdout is the LSP stream; anything printed by mistake goes to stderr
+    sys.exit(main())

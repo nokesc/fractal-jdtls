@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!--
+  The boot jar (design §6): the helper the advice calls, loaded through the
+  agent jar's Boot-Class-Path. JDK types only in its signatures.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.fractal.jdtls</groupId>
+    <artifactId>fractal-jdtls-parent</artifactId>
+    <version>0-dev</version>
+    <relativePath>../../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>fractal-jdtls-boot</artifactId>
+  <name>Fractal JDT LS boot helper</name>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>fractal-jdtls-boot</finalName>
+  </build>
+</project>

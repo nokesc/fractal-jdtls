@@ -2,7 +2,7 @@
 
 What Fractal JDT LS delivers, and how it is built, verified and released. [README.md](../README.md) says why it exists. The design and the code are authoritative. Task files only order the work.
 
-The decisions below were made by Chris on 2026-11-01, starting from the JDT LS worktree spike. The spike is seeded at [.context/spike/jdtls-worktree-spike/](spike/jdtls-worktree-spike/), and its [FINDINGS.md](spike/jdtls-worktree-spike/FINDINGS.md) is the evidence the agent is built on.
+The decisions below were made by Chris on 2026-11-01, starting from the JDT LS worktree spike. Its findings, [research/jdtls-worktree-spike.md](research/jdtls-worktree-spike.md) (cited below as FINDINGS), are the evidence the agent is built on.
 
 ## 1. Scope and boundaries
 
@@ -31,13 +31,14 @@ The decisions below were made by Chris on 2026-11-01, starting from the JDT LS w
     bin/jdtls          the launcher (§5); called run.py in the discussion that led to this design
     lib/               the agent jar and the boot jar (§6)
     pin.json           the pin (§3)
+    release-files.json the SHA-256 of every other file in the zip (§4)
     LICENSE  NOTICE
   ```
 - **Installed layout:** one folder per release, containing everything ("option A"):
 
   ```
   ~/.local/share/fractal-jdtls/1.63.0-1/
-    bin/  lib/  pin.json  LICENSE  NOTICE     copied from the zip
+    bin/  lib/  pin.json  release-files.json  LICENSE  NOTICE     copied from the zip
     lib/byte-buddy-<version>.jar              from Maven Central, verified
     eclipse/                                  JDT LS from Eclipse, verified
   ```
@@ -64,7 +65,7 @@ The decisions below were made by Chris on 2026-11-01, starting from the JDT LS w
 1. Downloads the tarball and checks it against Eclipse's published `<tarball>.sha256`.
 2. Records the hash of every file.
 3. Classifies each jar:
-   - signed by the Eclipse Foundation (`jarsigner -verify`);
+   - signed by the Eclipse Foundation (`jarsigner -verify`, with the signer's chain valid, not self-signed and allowed to sign code; a warning about the timestamp authority alone doesn't disqualify a jar);
    - byte-identical to an artifact on Maven Central (by the artifact's published hash);
    - or **neither**: trusted only through the tarball's checksum.
 4. Downloads Byte Buddy from Central, records its hash, and verifies its PGP signature (`.asc`) when `gpg` and the maintainer's key are available.
@@ -77,7 +78,9 @@ Hashes we compute ourselves only prove a file hasn't changed since. **What a fil
 Checked on 2026-11-01.
 
 - The tarball is `jdt-language-server-1.63.0-202610191322.tar.gz`, SHA-256 `b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4`. Eclipse publishes `.sha256` only, with no PGP signature.
-- **58 of 110 jars** in `plugins/` pass `jarsigner -verify`, signed by `CN=Eclipse Foundation`. **52 are unsigned,** including all of m2e (`m2e.core`, `m2e.jdt`, `m2e.maven.runtime`, `m2e.apt.core`).
+- **58 of 110 jars** in `plugins/` pass `jarsigner -verify`, signed by the Eclipse Foundation. **52 are unsigned,** including all of m2e (`m2e.core`, `m2e.jdt`, `m2e.maven.runtime`, `m2e.apt.core`).
+  - The signer certificates use three names for the Foundation: `Eclipse Foundation`, `Eclipse Foundation, Inc.` and `Eclipse.org Foundation, Inc.`. `tools/pin.py` accepts all three, and rejects a signer whose chain is invalid or self-signed, whatever its name.
+  - `org.eclipse.m2e.workspace.cli_0.4.0.jar` counts as signed: plain `jarsigner -verify` passes it. Only its timestamp authority's chain is invalid and the timestamp expired, so `jarsigner -verify -strict` would reject it and the count would be 57. It is also byte-identical to Maven Central, and the pin report records the warning.
 - Gson, Guava, ASM, commons-lang3 and jsoup are byte-identical to Maven Central, which has `.asc` signatures for them.
 - The bundled m2e build, `2.8.0.20260815-0704`, isn't on m2e's release site (`2.7.800`) or its snapshot site (`3.0.0`), so it can't be checked against m2e's PGP-signed update sites.
 - **A second source for m2e:** Red Hat's VS Code Java extension `1.59.2026103108` (Marketplace, universal package) bundles JDT LS 1.64.0 with byte-identical m2e jars. This is optional, used when an extension version bundles the pinned JDT LS version.
@@ -91,6 +94,9 @@ Checked on 2026-11-01.
 - **Atomic.** It downloads and unpacks into a temporary folder beside the target, verifies everything against `pin.json`, then renames it into place. A failed or interrupted install never leaves a partial target. The tarball's checksum is checked before unpacking, and every unpacked file's checksum after.
 - **Byte Buddy** is downloaded from Maven Central into `lib/` and verified against the pin.
 - **`--verify`** re-checks an existing install and reports every missing, extra or changed file.
+  - **The release's own files are verified too,** through `release-files.json`. `pin.json` can't hold their hashes: it is one of them, and the agent jar is built after the pin. So `release:zip` writes `release-files.json` with the release ID and the SHA-256 of every other file in the zip (`bin/`, the agent and boot jars, `pin.json`, `LICENSE`, `NOTICE`). The installer checks the unzipped release against it before installing, copies it into the install, and `--verify` and the launch check (§5) check those files' contents against it, wherever they run from. Its release ID must equal `pin.json`'s. (Decided by the governor on 2026-11-02 during T001.03, under Chris's delegation; to review.)
+  - **Root and concurrency.** The root is `--root`, else `FRACTAL_JDTLS_ROOT`, else, for an installed `install.py`, the root it's installed in, else the XDG default (§2). Installs hold a lock file, `<root>/.<release>.lock`, so a later install can safely remove the partial folder a killed one left beside the target.
+  - **A target that exists but fails verification is left alone,** with an instruction to delete it and run again. The installer never repairs or overwrites an install.
 - Errors say exactly what failed and what to do. It exits non-zero on any failure.
 
 ## 5. The launcher: `bin/jdtls`
@@ -104,18 +110,22 @@ Checked on 2026-11-01.
 
 - **Java.** It uses `--java-executable`, then `JAVA_HOME`, then `java` on `PATH`, the stock order. It **only checks** that the version meets the pin's minimum, and fails with a clear message otherwise. Choosing a JDK that suits the project is the client's job.
 - **Workspace (`-data`).** Whatever the client passes. When none is given, the default is `${XDG_CACHE_HOME:-~/.cache}/fractal-jdtls/ws/<sha1 of the canonical working directory>`, keyed on the full path. The stock launcher keys on the folder name only, which lets two checkouts with the same folder name share one workspace.
-- **Configuration area.** It passes a writable `-configuration` outside the install, kept per workspace (next to or inside `-data`), so the install stays read-only and verifiable. Confirm with a real run that nothing is written inside the install.
+  - A client's `-data` and `-configuration` pass to Equinox unchanged, as with the stock launcher. The launcher resolves them as the pinned Equinox does, and refuses, before starting Java, any that resolves inside the install, and the forms whose folder is ambiguous: `file:` URLs with `?` or `#`, upper-case `FILE:`, other URL schemes and `@` locations. (Decided by the governor on 2026-11-02 during T001.05; to review.)
+- **Configuration area.** It passes a writable `-configuration` outside the install, at `<data>/.fractal-jdtls/<release>/configuration`, so the install stays read-only and verifiable. Confirm with a real run that nothing is written inside the install.
   - The stock `bin/jdtls.py` already points Equinox at the install's read-only shared configuration (`-Dosgi.sharedConfiguration.area=<install>/config_linux`, `…area.readOnly=true`, `-Dosgi.configuration.cascaded=true`), but passes no `-configuration`. Equinox then puts its writable area at `<install>/configuration`. Keeping the stock properties and adding `-configuration <writable folder>` is enough; an empty folder works because the cascade supplies `config.ini`.
-- **Verification at launch.** Before starting JDT LS, it checks the install against `pin.json`. If the cost is more than about half a second, measure it, record it and raise it with Chris.
+- **Verification at launch.** Before starting JDT LS, it checks the install against `pin.json` and `release-files.json` (§4). If the cost is more than about half a second, measure it, record it and raise it with Chris.
 - **No other options.** Compiler preferences, LSP settings and JVM sizing belong to the client, through `--jvm-arg`, files the client writes into its own `-data`, or LSP.
 - It replaces itself with the `java` process, as the stock launcher does on POSIX, so the LSP client's stdin and stdout connect straight to JDT LS.
+- **Boot delegation is merged, never replaced.** If the client passes its own `-Dorg.osgi.framework.bootdelegation=…` through `--jvm-arg`, the launcher passes one property: the client's packages plus the boot helper's. The last `-D` would otherwise win, and losing the boot helper's package breaks m2e itself, which the checkpoint (§6) can't catch.
+- **stdout belongs to LSP.** The launcher and its checks write only to stderr; anything on stdout before `exec` corrupts the LSP stream.
+- **Nothing is written into the install,** including Python bytecode: the launcher doesn't write `__pycache__` for itself or for any module it imports from the install, and it never runs the stock `eclipse/bin/jdtls`, which would.
 
 ## 6. The agent
 
 Built from the spike's `Spike.java` and `SpikeAgent.java`, with the behavior of the spike's `fix` mode. FINDINGS "Result" items 1–3 are the specification.
 
 - **Always on.** There are no modes and no off switch in the product. `trace`, `names`, `fix` and `mavenRequester` were switches for the experiment. Anything like them lives only in test code.
-- **Naming.** Each Eclipse project is named `<worktree-dir>.<name>`.
+- **Naming.** Each Eclipse project is named `<worktree-dir>.<name>`, where `<name>` is m2e's name, always prefixed: m2e computes that name afresh from the POM on each creation, so it never already carries the prefix, and skipping names that look prefixed would make `harness-app` and `wt-a.harness-app` collide.
 - **Worktree identity.** The worktree is the nearest ancestor of the project's `pom.xml` that contains `.git`, whether that's a file (a linked worktree) or a folder (a main checkout). Nothing is passed in by the launcher or client: folders added at runtime work the same way. The spike's `spike.worktrees` property is dropped.
 - **Outside any worktree** (no `.git` ancestor), the agent changes nothing: the project keeps m2e's name, and lookups it requests keep m2e's choice. Same for a requester that can't be determined.
 - **Resolution.** When several workspace POMs share a groupId, artifactId and version, prefer the one in the requester's worktree, using the lookups and requester hooks listed in FINDINGS.
@@ -138,9 +148,10 @@ Built from the spike's `Spike.java` and `SpikeAgent.java`, with the behavior of 
 - **Fail loudly.** It reports clearly, on stderr and in the JDT LS log:
   - any hook that isn't in place (FINDINGS "Constraints and risks"), as defined below;
   - **two worktrees in one process with the same prefix,** once per collision. Making folder names unique within one process is the client's rule. The agent only reports a collision, at no ongoing cost.
+  - **a hook that fails while running,** for example because an m2e field it reads was renamed by an update. It's reported once per hook, and that call keeps m2e's own result. Reports go to the process's original stderr, captured in `premain`, because JDT LS replaces `System.err` after it starts.
 - **A hook is in place only when its method was advised,** not when its class was transformed. Byte Buddy reports a class as transformed even when no method in it matched, so a changed signature after an upgrade would otherwise pass silently. For each target class, the agent counts the methods its matcher selects, and reports a hook whose matcher selects none, or more than one, as soon as the class loads. A class that fails to transform is reported from Byte Buddy's error listener.
 - **When a hook that never loaded is reported.** The target classes load lazily, the Maven ones only when the first Maven project is read, so a missing class can't be detected in `premain`. The checkpoint is the first return from `populateClasspath`: by then a Maven project has been read and configured, and every other target class must have been advised, or it's reported. If `populateClasspath` itself is never advised, the agent reports at JVM shutdown every target still not in place, provided at least one other hook was. A workspace with no Maven projects reaches neither point and reports nothing, which is correct: the hooks don't matter there. T001.04 confirms with real runs, on a fresh import and on a restart, that every target class has loaded by the checkpoint.
-- **An optional diagnostic log,** off by default, enabled by a system property that names the file. One JSON line per event, which the integration suite asserts on (§8):
+- **An optional diagnostic log,** off by default, enabled by the system property `fractal.jdtls.diagnosticLog`, which names the file. One JSON line per event, which the integration suite asserts on (§8):
   - each hook in place, and each hook not in place;
   - each naming decision: the POM, m2e's name and the result;
   - each GAV lookup at either resolution site: the site, the GAV, the requester (or none), the candidate POMs, m2e's choice and the final choice;

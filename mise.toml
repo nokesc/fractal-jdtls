@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: Apache-2.0
+# Mise owns runtime pins, this checkout's environment and named workflows.
+[tools]
+python = "3.12.14"
+uv = "0.12.13"
+java = "25.0.1"
+maven = "3.9.12"
+workmux = "0.1.272"
+
+[env]
+_.python.venv = {path = ".venv", create = true}
+UV_CACHE_DIR = "{{config_root}}/.cache/uv"
+
+[tasks.setup]
+description = "Install the locked Python dependencies into this checkout's own .venv"
+run = "uv sync --locked"
+
+[tasks.test]
+description = "Run the unit tests: the agent's (JUnit, in the build), then pytest's (tests/unit), which check the built jars"
+depends = ["build"]
+run = "python -m pytest"
+
+[tasks.build]
+description = "Build the agent jar and the boot jar with Maven (agent/*/target/), running the agent's JUnit tests"
+run = "mvn --batch-mode --no-transfer-progress package"
+
+[tasks.pin]
+description = "Maintainers: re-pin JDT LS into pin.json and .context/pins/ (tools/pin.py <version> [--release n])"
+run = "python tools/pin.py"
+
+[tasks."release:zip"]
+description = "Build the release zip, build/fractal-jdtls-<release>.zip, from the jars of mise run build"
+depends = ["build"]
+run = "python tools/release_zip.py"
+
+[tasks."release:check-tag"]
+description = "Check a release tag against pin.json and its release notes (tools/release_tag.py <tag>), the release workflow's first step"
+run = "python tools/release_tag.py"
+
+[tasks."test:integration"]
+description = "Run the integration suite (tests/integration): real JDT LS, installed from a built release zip into a scratch root, on a main checkout and two worktrees. Needs network; Maven cache in $FRACTAL_JDTLS_TEST_CACHE, else .cache/integration"
+depends = ["build"]
+run = "python -m pytest tests/integration"
+
+[tasks.validate]
+description = "Run the complete release gate: the jar build with its JUnit tests, the pytest unit tests, the release zip, then the integration suite"
+run = [{task = "test"}, {task = "release:zip"}, {task = "test:integration"}]

@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# Python here is development tooling only: the shipped scripts (bin/) use the
+# standard library and run without this environment.
+[project]
+name = "fractal-jdtls"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+addopts = "-ra"

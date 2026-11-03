@@ -1,0 +1,6 @@
+Fractal JDT LS
+Copyright 2026 Chris Nokes
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+It contains no third-party code. Eclipse JDT LS and Byte Buddy are downloaded
+by the installer from their official sources, under their own licenses.

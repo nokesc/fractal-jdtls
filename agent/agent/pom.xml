@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!--
+  The agent jar (design §6): premain and advice. Byte Buddy and the boot jar are
+  compile-time only; at runtime the manifest finds both next to this jar in lib/.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.fractal.jdtls</groupId>
+    <artifactId>fractal-jdtls-parent</artifactId>
+    <version>0-dev</version>
+    <relativePath>../../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>fractal-jdtls-agent</artifactId>
+  <name>Fractal JDT LS agent</name>
+
+  <dependencies>
+    <dependency>
+      <groupId>net.bytebuddy</groupId>
+      <artifactId>byte-buddy</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.fractal.jdtls</groupId>
+      <artifactId>fractal-jdtls-boot</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>fractal-jdtls-agent</finalName>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <configuration>
+          <archive>
+            <manifestEntries>
+              <Premain-Class>org.fractal.jdtls.agent.Agent</Premain-Class>
+              <Can-Retransform-Classes>true</Can-Retransform-Classes>
+              <Boot-Class-Path>fractal-jdtls-boot.jar</Boot-Class-Path>
+              <Class-Path>byte-buddy-${byte-buddy.version}.jar</Class-Path>
+            </manifestEntries>
+          </archive>
+        </configuration>
+        <executions>
+          <!--
+            Test only, never in the release zip: a variant of the agent with one hook's
+            matcher naming a method that doesn't exist (BrokenHookAgent), to show that a
+            broken hook is reported (design §6). Put it in lib/ beside the product jars.
+          -->
+          <execution>
+            <id>broken-hook-agent</id>
+            <goals>
+              <goal>test-jar</goal>
+            </goals>
+            <configuration>
+              <classifier>broken-hook</classifier>
+              <includes>
+                <include>org/fractal/jdtls/agent/BrokenHookAgent*.class</include>
+              </includes>
+              <archive>
+                <manifestEntries>
+                  <Premain-Class>org.fractal.jdtls.agent.BrokenHookAgent</Premain-Class>
+                  <Can-Retransform-Classes>true</Can-Retransform-Classes>
+                  <Boot-Class-Path>fractal-jdtls-boot.jar</Boot-Class-Path>
+                  <Class-Path>fractal-jdtls-agent.jar byte-buddy-${byte-buddy.version}.jar</Class-Path>
+                </manifestEntries>
+              </archive>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
