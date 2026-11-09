@@ -8,7 +8,10 @@ requires-python = ">=3.12"
 dependencies = []
 
 [dependency-groups]
-dev = ["pytest"]
+dev = [
+    "openapi-spec-validator>=0.9.0",
+    "pytest",
+]
 
 [tool.uv]
 package = false
@@ -16,3 +19,12 @@ package = false
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]
 addopts = "-ra"
+# The test scratch folder keeps pytest's numbered sessions (tests/conftest.py, design §8): a gate is two, unit and
+# integration, so six keep three gates.
+tmp_path_retention_count = 6
+tmp_path_retention_policy = "all"
+markers = [
+    "imports: the 20 large-tree imports of T002.04, run by mise run test:imports and not by the gate",
+    "run05: run 05 through build on 20 fresh copies (T002.05), run by mise run test:run05 and not by the gate",
+    "soak: the several-sessions scenario for 10 minutes (T002.11), run by mise run test:soak and not by the gate",
+]

@@ -20,27 +20,21 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import scratch_folder  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 CACHE_ENV = "FRACTAL_JDTLS_TEST_CACHE"
 
 
-def stray_git_above(folder: Path):
-    """The nearest .git above folder, if any: it would put the scratch worktrees' parents in a checkout."""
-    for parent in folder.resolve().parents:
-        if (parent / ".git").exists():
-            return parent / ".git"
-    return None
-
-
 @pytest.fixture(scope="session")
 def scratch(tmp_path_factory) -> Path:
+    """This session's folder, under the test scratch folder that tests/conftest.py checked and locked (design §8)."""
     base = tmp_path_factory.getbasetemp()
-    stray = stray_git_above(base)
-    assert stray is None, (
-        f"found {stray}, which makes every folder below it, including this suite's scratch folder {base}, "
-        f"look like part of a Git checkout. Projects outside the fixture's worktrees would then be inside "
-        f"one. Remove the stray {stray} (if it's an empty folder: rmdir {stray}) and run the suite again."
-    )
+    # tests/conftest.py checked the scratch folder and everything above it; this covers pytest's own levels below.
+    stray = scratch_folder.git_at_or_above(base)
+    assert stray is None, scratch_folder.stray_git_message(stray, base)
     return base
 
 

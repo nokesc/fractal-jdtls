@@ -57,7 +57,26 @@ jobs:
       # 2. The full gate: the agent build and JUnit tests, the unit tests, the zip, and the
       #    integration suite against real JDT LS (needs network; no Maven cache yet).
       - name: Run the release gate
+        id: gate
         run: mise run validate
+
+      # A failed gate's records: the test scratch folder (design §8), beside the checkout. pytest-current only
+      # links to the newest session, which is uploaded anyway; hidden files include JDT LS's -data/.metadata/.log.
+      - name: Drop the scratch folder's pytest-current link before its upload
+        if: failure() && steps.gate.outcome == 'failure'
+        env:
+          SCRATCH: ${{ github.workspace }}__scratch
+        run: if [ -d "$SCRATCH" ]; then find "$SCRATCH" -maxdepth 2 -name pytest-current -type l -delete; fi
+
+      - name: Upload the test scratch folder of a failed gate
+        if: failure() && steps.gate.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-scratch-${{ github.ref_name }}
+          path: ${{ github.workspace }}__scratch/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Show the zip
         env:

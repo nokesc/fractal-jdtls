@@ -42,24 +42,46 @@ ECLIPSE_FILES = {
     # The stock launcher leaves a mark if anything runs it.
     "bin/jdtls": (b'#!/bin/sh\ntouch "$STOCK_MARK"\n', 0o755),
     "bin/jdtls.py": (b"# stock\n", 0o644),
-    "config_linux/config.ini": (b"osgi.bundles=...\n", 0o644),
+    "config_linux/config.ini": (
+        b"#Product Runtime Configuration File\n"
+        b"osgi.bundles=reference\\:file\\:a_1.0.jar@2\\:start,reference\\:file\\:b_2.0/@4,\\\n"
+        b"  reference\\:file\\:c_3.0.jar@4\\:start\n"
+        b"osgi.bundles.defaultStartLevel=4\n",
+        0o644,
+    ),
     "config_linux_arm/config.ini": (b"osgi.bundles=...\n", 0o644),
     LAUNCHER_JAR: (b"equinox launcher\n", 0o644),
     "plugins/org.eclipse.equinox.launcher.gtk.linux.x86_64_1.2.1700.v20260913-1737.jar": (b"fragment\n", 0o644),
     "plugins/org.eclipse.jdt.ls.core_1.63.0.jar": (b"jdt ls\n" * 1000, 0o644),
 }
 
-# A fake java. `-version` prints a version line to stderr, as java does. Otherwise it
+# A fake java. `-version` prints a version line to stderr, as java does, and
+# `--list-modules` lists jdk.httpserver unless $FAKE_JAVA_NO_HTTPSERVER is set. Otherwise it
 # records its argv and pid in $FAKE_JAVA_RECORD and echoes stdin to stdout, so a test
 # can see that the LSP client's stdin and stdout connect straight to it.
 FAKE_JAVA = """#!{python}
 import json, os, sys
+if sys.argv[1:] in (["-version"], ["--list-modules"]) and os.environ.get("FAKE_JAVA_PREFLIGHT"):
+    with open(os.environ["FAKE_JAVA_PREFLIGHT"], "a") as out:
+        out.write(json.dumps({{"argv": sys.argv[1:], "environ": dict(os.environ)}}) + "\\n")
 if sys.argv[1:] == ["-version"]:
     print('openjdk version "{version}" 2025-10-21', file=sys.stderr)
     print("OpenJDK Runtime Environment (build {version})", file=sys.stderr)
     sys.exit(0)
+if sys.argv[1:] == ["--list-modules"]:
+    print("java.base@{version}")
+    if not os.environ.get("FAKE_JAVA_NO_HTTPSERVER"):
+        print("jdk.httpserver@{version}")
+    sys.exit(0)
+token = None
+for arg in sys.argv:
+    if arg.startswith("-Dfractal.jdtls.http.tokenFd="):  # HTTP mode: read the token as the endpoint does
+        with open("/proc/self/fd/" + arg.split("=", 1)[1], "rb") as pipe:
+            token = pipe.read().decode("ascii")
 with open(os.environ["FAKE_JAVA_RECORD"], "w") as out:
-    json.dump({{"argv": sys.argv, "pid": os.getpid(), "java": {java!r}}}, out)
+    stdio = [os.path.realpath(f"/proc/self/fd/{{fd}}") for fd in (0, 1, 2)]
+    json.dump({{"argv": sys.argv, "pid": os.getpid(), "java": {java!r}, "environ": dict(os.environ), "token": token,
+               "stdio": stdio}}, out)
 sys.stdout.buffer.write(sys.stdin.buffer.read())
 """
 
@@ -82,6 +104,8 @@ def make_install(root: Path, release: str = RELEASE) -> Path:
         (target / "bin" / name).chmod(0o755)
     (target / "lib" / "fractal-jdtls-agent.jar").write_bytes(b"agent jar\n")
     (target / "lib" / "fractal-jdtls-boot.jar").write_bytes(b"boot jar\n")
+    (target / "lib" / "fractal-jdtls-endpoint.jar").write_bytes(b"endpoint jar\n")
+    (target / "lib" / "http-mode-preferences.ini").write_text("# preferences\n")
     byte_buddy = b"byte buddy jar\n"
     (target / "lib" / "byte-buddy-1.2.3.jar").write_bytes(byte_buddy)
     (target / "LICENSE").write_text("Apache License\n")
@@ -513,6 +537,239 @@ def test_a_release_folder_that_isnt_installed_is_refused(world, capsys, tmp_path
     assert f"isn't an install of fractal-jdtls {RELEASE}" in capsys.readouterr().err
 
 
+# --- HTTP mode (design §11) ----------------------------------------------------------
+
+TOKEN = "t0ken-" + "x" * 40
+STOCK_BUNDLES = "reference:file:a_1.0.jar@2:start,reference:file:b_2.0/@4,reference:file:c_3.0.jar@4:start"
+
+
+class ExecE:
+    """Stands in for os.execve; reads the token pipe as the endpoint would."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, path, argv, env):
+        fd = next(int(a.split("=", 1)[1]) for a in argv if a.startswith("-Dfractal.jdtls.http.tokenFd="))
+        inheritable = os.get_inheritable(fd)
+        with open(fd, "rb") as pipe:  # closes it
+            token = pipe.read()
+        self.calls.append({"path": path, "argv": list(argv), "env": dict(env), "token": token, "inheritable": inheritable})
+
+
+def launch_http(world, *argv, token=TOKEN, environ=None):
+    environ = dict(environ or world.environ)
+    if token is not None:
+        environ[jdtls.TOKEN_ENV] = token
+    execv, execve = Exec(), ExecE()
+    redirected = []  # the real redirect would rewire this test process's own stdin and stdout
+    code = jdtls.main(list(argv), release_dir=world.target, environ=environ, cwd=str(world.cwd), execv=execv, execve=execve,
+                      redirect=lambda: redirected.append(True))  # fmt: skip
+    execve.redirected = redirected
+    return code, execv, execve
+
+
+def http_options(world, data, port_file, settings=None):
+    endpoint = world.target / "lib" / "fractal-jdtls-endpoint.jar"
+    options = [
+        f"-Dosgi.bundles={STOCK_BUNDLES},reference:file:{endpoint}@4:start",
+        "-DwatchParentProcess=false",
+        "-Djava.import.generatesMetadataFilesAtProjectRoot=false",
+        f"-Declipse.pluginCustomization={world.target / 'lib' / 'http-mode-preferences.ini'}",
+        "-Dsun.net.httpserver.maxReqTime=10",
+        "-Dsun.net.httpserver.maxRspTime=3900",
+        "-Dsun.net.httpserver.drainAmount=0",
+        "-Djdk.httpserver.maxConnections=256",
+        f"-Dfractal.jdtls.http.portFile={port_file}",
+    ]
+    if settings:
+        options.append(f"-Dfractal.jdtls.http.settings={settings}")
+    return options + [
+        f"-Dfractal.jdtls.http.log={data / '.fractal-jdtls' / RELEASE / 'endpoint.log'}",
+        f"-Dfractal.jdtls.http.state={data / '.fractal-jdtls' / 'worktrees.json'}",
+        f"-Dfractal.jdtls.http.release={RELEASE}",
+    ]
+
+
+def test_http_mode_adds_its_options_after_the_clients_and_hands_over_the_token_on_a_pipe(world, capsys):
+    data = world.tmp / "ws"
+    settings = world.tmp / "settings.json"
+    settings.write_text("{}")
+    code, execv, execve = launch_http(
+        world, f"--java-executable={world.java}", "--jvm-arg=-Xmx2G", "-data", str(data),
+        "--http-port-file", "port.json", f"--http-settings={settings}", "--some-jdtls-flag",
+    )  # fmt: skip
+    assert code == 0, capsys.readouterr().err
+    assert not execv.calls
+    (call,) = execve.calls
+    argv = call["argv"]
+    fd_option = argv[argv.index("-jar") - 1]
+    assert fd_option.startswith("-Dfractal.jdtls.http.tokenFd=")
+    expected = stock_command(world, world.java, data, jvm_args=["-Xmx2G"], extra=["--some-jdtls-flag"])
+    at = expected.index("-jar")
+    assert argv == expected[:at] + http_options(world, data, world.cwd / "port.json", settings) + [fd_option] + expected[at:]
+    # The token is on the pipe and nowhere else: not in the command, not in Java's environment.
+    assert call["token"] == TOKEN.encode() and call["inheritable"]
+    assert not any(TOKEN in arg for arg in argv)
+    assert call["env"] == world.environ
+    assert execve.redirected == [True]
+    assert (data / ".fractal-jdtls" / RELEASE).is_dir()
+    assert TOKEN not in capsys.readouterr().err
+
+
+def test_without_the_port_file_option_the_command_is_the_plain_one_even_with_a_token(world):
+    code, execv, execve = launch_http(world, f"--java-executable={world.java}", "-data", str(world.tmp / "ws"))
+    assert code == 0 and not execve.calls
+    assert execv.argv == stock_command(world, world.java, world.tmp / "ws")
+
+
+def test_a_port_file_left_from_an_earlier_run_is_removed(world):
+    port_file = world.tmp / "port.json"
+    port_file.write_text('{"port": 1, "pid": 1}')
+    code, _, execve = launch_http(world, f"--java-executable={world.java}", "-data", str(world.tmp / "ws"), f"--http-port-file={port_file}")
+    assert code == 0 and len(execve.calls) == 1
+    assert not port_file.exists()
+
+
+@pytest.mark.parametrize(
+    "token, message",
+    [
+        (None, "HTTP mode needs a token: set FRACTAL_JDTLS_HTTP_TOKEN to 32 to 4096 visible ASCII characters"),
+        ("", "HTTP mode needs a token"),
+        ("x" * 31, "FRACTAL_JDTLS_HTTP_TOKEN has 31 characters; HTTP mode needs 32 to 4096."),
+        ("x" * 4097, "FRACTAL_JDTLS_HTTP_TOKEN has 4097 characters; HTTP mode needs 32 to 4096."),
+        ("x" * 32 + " y", "FRACTAL_JDTLS_HTTP_TOKEN must be visible ASCII characters only, with no spaces."),
+        ("x" * 32 + "é", "FRACTAL_JDTLS_HTTP_TOKEN must be visible ASCII characters only"),
+    ],
+)
+def test_http_mode_refuses_a_missing_or_bad_token_without_showing_it(world, capsys, token, message):
+    code, execv, execve = launch_http(world, f"--java-executable={world.java}", "--http-port-file", str(world.tmp / "p"), token=token)
+    err = capsys.readouterr().err
+    assert code == 1 and not execv.calls and not execve.calls
+    assert message in err
+    assert not token or token not in err
+
+
+@pytest.mark.parametrize(
+    "jvm_arg, message",
+    [
+        ("-DwatchParentProcess=true", "HTTP mode fixes -DwatchParentProcess=false"),
+        ("-DwatchParentProcess", "HTTP mode fixes -DwatchParentProcess=false"),
+        ("-Djava.import.generatesMetadataFilesAtProjectRoot=true", "HTTP mode fixes -Djava.import.generatesMetadataFilesAtProjectRoot=false"),
+        ("-Dosgi.bundles=reference:file:x.jar@4:start", "HTTP mode sets -Dosgi.bundles itself"),
+        ("-Declipse.pluginCustomization=/x.ini", "HTTP mode sets -Declipse.pluginCustomization itself, to lib/http-mode-preferences.ini"),
+        ("-Dfractal.jdtls.http.portFile=/x", "HTTP mode sets -Dfractal.jdtls.http.* itself"),
+        ("-Dfractal.jdtls.http.tokenFd=0", "HTTP mode sets -Dfractal.jdtls.http.* itself"),
+        ("-Dsun.net.httpserver.maxReqTime=0", "HTTP mode sets the JDK HTTP server's limits itself"),
+        ("-Djdk.httpserver.maxConnections=9999", "HTTP mode sets the JDK HTTP server's limits itself"),
+        ("-DCLIENT_PORT=5036", "HTTP mode allows JDT LS no LSP transport but the endpoint's"),
+        ("-DCLIENT_HOST=localhost", "HTTP mode allows JDT LS no LSP transport but the endpoint's"),
+    ],
+)
+def test_http_mode_refuses_a_jvm_arg_that_changes_what_it_fixes(world, capsys, jvm_arg, message):
+    code, _, execve = launch_http(world, f"--java-executable={world.java}", f"--jvm-arg={jvm_arg}", "--http-port-file", str(world.tmp / "p"))
+    assert code == 2 and not execve.calls
+    assert message in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("arg", ["--pipe=/tmp/lsp.sock", "-Dx=--pipe=/tmp/lsp.sock", "-DCLIENT_PORT=5036"])
+def test_http_mode_refuses_a_jdtls_argument_for_another_transport(world, capsys, arg):
+    code, _, execve = launch_http(world, f"--java-executable={world.java}", "--http-port-file", str(world.tmp / "p"), arg)
+    assert code == 2 and not execve.calls
+    assert f"{arg}: HTTP mode allows JDT LS no LSP transport but the endpoint's" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("arg", ["-pluginCustomization", "-plugincustomization"])
+def test_http_mode_refuses_a_jdtls_argument_for_other_preference_defaults(world, capsys, arg):
+    code, _, execve = launch_http(world, f"--java-executable={world.java}", "--http-port-file", str(world.tmp / "p"), arg, "/x.ini")
+    assert code == 2 and not execve.calls
+    assert f"{arg}: HTTP mode sets -Declipse.pluginCustomization itself" in capsys.readouterr().err
+
+
+def test_the_http_mode_preferences_turn_lightweight_refresh_off_and_nothing_else():
+    lines = [line for line in (ROOT / "endpoint/src/main/preferences/http-mode-preferences.ini").read_text().splitlines()
+             if line and not line.startswith("#")]  # fmt: skip
+    assert lines == ["org.eclipse.core.resources/refresh.lightweight.enabled=false"]
+
+
+def test_plain_mode_passes_a_pipe_argument_on_as_the_stock_launcher_does(world):
+    code, execv, _ = launch_http(world, f"--java-executable={world.java}", "-data", str(world.tmp / "ws"), "--pipe=/tmp/x")
+    assert code == 0 and execv.argv[-1] == "--pipe=/tmp/x"
+
+
+def test_http_mode_removes_the_client_socket_variables_and_says_so(world, capsys):
+    environ = {**world.environ, "CLIENT_PORT": "5036", "CLIENT_HOST": "localhost"}
+    code, _, execve = launch_http(world, f"--java-executable={world.java}", "--http-port-file", str(world.tmp / "p"), environ=environ)
+    assert code == 0
+    assert execve.calls[0]["env"] == world.environ
+    err = capsys.readouterr().err
+    for name in ("CLIENT_PORT", "CLIENT_HOST"):
+        assert f"jdtls: HTTP mode: {name} removed from Java's environment" in err
+
+
+def test_http_mode_accepts_a_jvm_arg_with_the_value_it_fixes(world):
+    code, _, execve = launch_http(
+        world, f"--java-executable={world.java}", "--jvm-arg=-DwatchParentProcess=false",
+        "--jvm-arg=-Dfractal.jdtls.diagnosticLog=/tmp/x", "--http-port-file", str(world.tmp / "p"),
+    )  # fmt: skip
+    assert code == 0
+    assert execve.calls[0]["argv"].count("-DwatchParentProcess=false") == 2
+
+
+@pytest.mark.parametrize(
+    "argv, message",
+    [
+        (["--http-settings", "s.json"], "--http-settings is for HTTP mode: pass --http-port-file too"),
+        (["--http-port-file="], "--http-port-file needs a file name"),
+        (["--http-port-file", "no/such/folder/port.json"], "its folder"),
+        (["--http-port-file", "."], "is a folder"),
+        (["--http-port-file", "p.json", "--http-settings", "missing.json"], "--http-settings missing.json: no readable file"),
+    ],
+)
+def test_http_mode_usage_errors(world, capsys, argv, message):
+    code, execv, execve = launch_http(world, f"--java-executable={world.java}", *argv)
+    assert code == 2 and not execv.calls and not execve.calls
+    assert message in capsys.readouterr().err
+
+
+def test_a_port_file_inside_the_install_is_refused(world, capsys):
+    code, _, execve = launch_http(world, f"--java-executable={world.java}", "--http-port-file", str(world.target / "port.json"))
+    assert code == 2 and not execve.calls
+    assert "is inside the install" in capsys.readouterr().err
+    assert not (world.target / "port.json").exists()
+
+
+def test_http_mode_needs_a_java_with_the_http_server_module(world, capsys):
+    environ = {**world.environ, "FAKE_JAVA_NO_HTTPSERVER": "1"}
+    code, _, execve = launch_http(world, f"--java-executable={world.java}", "--http-port-file", str(world.tmp / "p"), environ=environ)
+    assert code == 1 and not execve.calls
+    assert "has no jdk.httpserver module" in capsys.readouterr().err
+
+
+def test_an_install_path_the_start_list_cant_hold_is_refused(tmp_path, scratch_home, capsys):
+    target = make_install(tmp_path / "a,b")
+    java = fake_java(tmp_path / "jdk", "25.0.1")
+    environ = {"PATH": os.defpath, "HOME": str(scratch_home), jdtls.TOKEN_ENV: TOKEN}
+    argv = [f"--java-executable={java}", "--http-port-file", str(tmp_path / "p"), "-data", str(tmp_path / "ws")]
+    code = jdtls.main(argv, release_dir=target, environ=environ, cwd=str(tmp_path), execv=Exec(), execve=ExecE())
+    assert code == 1
+    assert "has a character Equinox's start list can't hold" in capsys.readouterr().err
+
+
+def test_read_properties_follows_java_properties_rules():
+    text = "# c\n! c\n a = 1\nb:2\nc 3\nd=x\\\n   y\\\\\ne=\\u0041\\:\\=\\t\nf\n"
+    assert jdtls.read_properties(text) == {"a": "1", "b": "2", "c": "3", "d": "xy\\", "e": "A:=\t", "f": ""}
+
+
+def test_help_documents_http_mode(world, capsys):
+    assert jdtls.main(["--help"], release_dir=world.target, environ=world.environ, cwd=str(world.cwd)) == 0
+    err = capsys.readouterr().err
+    for text in ("--http-port-file FILE", "--http-settings FILE", "FRACTAL_JDTLS_HTTP_TOKEN", "-DwatchParentProcess=false",
+                 "-Djava.import.generatesMetadataFilesAtProjectRoot=false", "java.autobuild.enabled: false",
+                 "-Dosgi.bundles", "endpoint.log", "POST /v1/shutdown"):  # fmt: skip
+        assert text in err, text
+
+
 # --- as a process: stdout, exec and the install --------------------------------------
 
 
@@ -559,6 +816,50 @@ def test_it_execs_java_in_its_own_process(world):
     assert process.returncode == 0, stderr.decode()
     assert json.loads(world.record.read_text())["pid"] == process.pid
     assert stdout == MESSAGE
+
+
+def test_the_integration_suites_control_launcher_still_drops_only_the_agent(world):
+    """tests/integration/launch_without_agent.py builds on prepare(); run 01 depends on it (design §8)."""
+    script = ROOT / "tests" / "integration" / "launch_without_agent.py"
+    data = world.tmp / "ws"
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", str(script), str(world.target), f"--java-executable={world.java}", "-data", str(data)],
+        input=b"", capture_output=True, cwd=world.cwd, env=world.environ, timeout=60,
+    )  # fmt: skip
+    assert result.returncode == 0, result.stderr.decode()
+    agent = [f"-javaagent:{world.target / 'lib' / 'fractal-jdtls-agent.jar'}", f"-Dorg.osgi.framework.bootdelegation={BOOT}"]
+    assert json.loads(world.record.read_text())["argv"] == [a for a in stock_command(world, world.java, data) if a not in agent]
+    refused = subprocess.run(
+        [sys.executable, "-I", "-B", str(script), str(world.target), f"--java-executable={world.java}", "-data", str(data),
+         "--http-port-file", str(world.tmp / "p")],
+        capture_output=True, cwd=world.cwd, env={**world.environ, "FRACTAL_JDTLS_HTTP_TOKEN": TOKEN}, timeout=60,
+    )  # fmt: skip
+    assert refused.returncode == 1 and b"plain mode only" in refused.stderr
+
+
+def test_in_http_mode_java_gets_the_token_on_a_pipe_and_not_in_its_environment(world):
+    port_file = world.tmp / "port.json"
+    environ = {**world.environ, "PATH": f"{Path(sys.executable).parent}:{os.defpath}", jdtls.TOKEN_ENV: TOKEN,
+               "CLIENT_PORT": "5036", "FAKE_JAVA_PREFLIGHT": str(world.tmp / "preflight.jsonl")}  # fmt: skip
+    result = subprocess.run(
+        [str(world.target / "bin" / "jdtls"), f"--java-executable={world.java}", "-data", str(world.tmp / "ws"),
+         f"--http-port-file={port_file}"],
+        input=b"", stdout=subprocess.PIPE, stderr=open(world.tmp / "stderr", "wb"), cwd=world.cwd, env=environ, timeout=60,
+    )  # fmt: skip
+    result.stderr = (world.tmp / "stderr").read_bytes()
+    assert result.returncode == 0, result.stderr.decode()
+    assert TOKEN.encode() not in result.stdout + result.stderr
+    record = json.loads(world.record.read_text())
+    assert record["token"] == TOKEN
+    assert jdtls.TOKEN_ENV not in record["environ"]
+    assert not any(TOKEN in arg for arg in record["argv"])
+    # No other Java the launcher starts sees it either: its checks of Java (review R3).
+    preflight = [json.loads(line) for line in Path(environ["FAKE_JAVA_PREFLIGHT"]).read_text().splitlines()]
+    assert [run["argv"] for run in preflight] == [["-version"], ["--list-modules"]]
+    assert not any(jdtls.TOKEN_ENV in run["environ"] or "CLIENT_PORT" in run["environ"] for run in preflight)
+    # stdin is /dev/null and stdout is stderr (review R1).
+    stdin, stdout, stderr = record["stdio"]
+    assert stdin == "/dev/null" and stdout == stderr != "/dev/null"
 
 
 @pytest.mark.parametrize(

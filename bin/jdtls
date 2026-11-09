@@ -6,6 +6,7 @@ A drop-in for Eclipse's stock ``bin/jdtls``:
 
     <root>/<release>/bin/jdtls [--java-executable JAVA] [--jvm-arg=OPTION ...]
                                [-data DIR] [JDT LS arguments ...]
+                               [--http-port-file FILE [--http-settings FILE]]
 
 It builds the stock ``java`` command (the Equinox launcher, the install's read-only
 shared configuration, ``--add-opens``), adds the agent and the boot helper's boot
@@ -30,6 +31,38 @@ connect straight to JDT LS. Before that it:
 - merges a client's ``-Dorg.osgi.framework.bootdelegation=...`` (the last one, which
   the JVM would use) with the boot helper's package into one property.
 
+**HTTP mode** (design §11), with ``--http-port-file``, also loads the endpoint bundle,
+``lib/fractal-jdtls-endpoint.jar``, which becomes JDT LS's only LSP client and serves a
+token-gated HTTP API on ``127.0.0.1``. Then the launcher also:
+
+- requires the token in ``$FRACTAL_JDTLS_HTTP_TOKEN`` (32 to 4096 visible ASCII
+  characters), removes it from the environment it starts Java with, and hands it to the
+  endpoint on an inherited pipe, whose descriptor ``-Dfractal.jdtls.http.tokenFd`` names;
+- passes ``-Dosgi.bundles``: the install's own start list from
+  ``eclipse/config_linux/config.ini``, plus the endpoint bundle;
+- passes ``-DwatchParentProcess=false`` and
+  ``-Djava.import.generatesMetadataFilesAtProjectRoot=false``, and refuses a ``--jvm-arg``
+  that sets either otherwise, sets ``-Dosgi.bundles``, or sets ``-Dfractal.jdtls.http.*``;
+- passes ``-Declipse.pluginCustomization`` with the install's
+  ``lib/http-mode-preferences.ini``, Eclipse preference defaults that turn lightweight
+  auto-refresh off, and refuses a ``--jvm-arg`` that sets it, or a ``-pluginCustomization``
+  argument;
+- passes the port file, the settings file (``--http-settings``), the endpoint's log,
+  ``<data>/.fractal-jdtls/<release>/endpoint.log``, the file where it keeps its
+  registered worktrees, ``<data>/.fractal-jdtls/worktrees.json``, and the release, as
+  ``-Dfractal.jdtls.http.*``; removes a port file left from an earlier run, so the file
+  appears only once this process listens;
+- checks that the Java has the ``jdk.httpserver`` module;
+- passes the JDK HTTP server's limits (``-Dsun.net.httpserver.maxReqTime`` and others) and
+  refuses a ``--jvm-arg`` that sets any ``-Dsun.net.httpserver.*`` or ``-Djdk.httpserver.*``;
+- allows JDT LS no other LSP transport: it refuses ``-DCLIENT_PORT``, ``-DCLIENT_HOST`` and
+  any argument with ``--pipe=``, removes ``CLIENT_PORT`` and ``CLIENT_HOST`` from Java's
+  environment (saying so on stderr), and starts Java with stdin from ``/dev/null`` and
+  stdout sent to stderr;
+- starts no Java with the token in its environment, its checks of Java included.
+
+Without ``--http-port-file``, the command line is exactly the plain one.
+
 It writes only to stderr (stdout is the LSP stream) and writes nothing into the
 install, not even Python bytecode.
 
@@ -50,6 +83,35 @@ import urllib.parse
 from pathlib import Path
 
 AGENT_JAR = "lib/fractal-jdtls-agent.jar"
+ENDPOINT_JAR = "lib/fractal-jdtls-endpoint.jar"
+# Eclipse preference defaults for HTTP mode (design §11 "Keeping in step with the disk"), read once at startup and
+# never written to the workspace.
+HTTP_PREFERENCES = "lib/http-mode-preferences.ini"
+PLUGIN_CUSTOMIZATION = "-Declipse.pluginCustomization"
+PLUGIN_CUSTOMIZATION_ARG = "-plugincustomization"
+TOKEN_ENV = "FRACTAL_JDTLS_HTTP_TOKEN"
+TOKEN_MIN, TOKEN_MAX = 32, 4096
+TOKEN_RE = re.compile(r"^[\x21-\x7e]+$")  # visible ASCII: it goes into an HTTP header
+HTTP_PROPERTY = "-Dfractal.jdtls.http."
+# What HTTP mode fixes (design §11): a client's --jvm-arg may repeat these values, never change them.
+HTTP_FIXED = {"-DwatchParentProcess": "false", "-Djava.import.generatesMetadataFilesAtProjectRoot": "false"}
+OSGI_BUNDLES = "-Dosgi.bundles"
+# JDT LS's other LSP transports (its ConnectionStreamFactory): a client socket, from these variables or the system
+# properties of the same names, and a named pipe, from an argument with --pipe=. HTTP mode allows none of them.
+TRANSPORT_VARIABLES = ("CLIENT_PORT", "CLIENT_HOST")
+PIPE_ARG = "--pipe="
+# The JDK HTTP server's limits (the endpoint's ServerLimits, which checks them): seconds to read a request,
+# seconds from its end to the response's end (above the longest timeoutMs, 3,600 s), no draining of an unread
+# body, and the most connections at once.
+SERVER_LIMITS = {
+    "-Dsun.net.httpserver.maxReqTime": "10",
+    "-Dsun.net.httpserver.maxRspTime": "3900",
+    "-Dsun.net.httpserver.drainAmount": "0",
+    "-Djdk.httpserver.maxConnections": "256",
+}
+SERVER_PROPERTIES = ("-Dsun.net.httpserver.", "-Djdk.httpserver.")
+# Characters that Equinox's start list can't hold in a bundle's location.
+UNSAFE_LOCATION_RE = re.compile(r"[,@%#?\s]")
 BOOT_PACKAGE = "org.fractal.jdtls.boot"
 BOOTDELEGATION = "-Dorg.osgi.framework.bootdelegation"
 ECLIPSE_DIR = "eclipse"
@@ -73,6 +135,7 @@ STOCK_OPTIONS = [
 ]  # fmt: skip
 USAGE = """\
 usage: jdtls [--java-executable JAVA] [--jvm-arg=OPTION ...] [-data DIR] [JDT LS arguments ...]
+             [--http-port-file FILE [--http-settings FILE]]
 
 Start JDT LS from this Fractal JDT LS install, with the agent that keeps Git
 worktrees' Maven projects apart. A drop-in for Eclipse's stock bin/jdtls.
@@ -85,6 +148,38 @@ worktrees' Maven projects apart. A drop-in for Eclipse's stock bin/jdtls.
 Every other argument is passed to JDT LS. Without -configuration, the configuration
 area is <data>/.fractal-jdtls/<release>/configuration. Neither -data nor -configuration
 may be inside the install.
+
+HTTP mode: JDT LS's only LSP client is the endpoint inside it, which serves a
+token-gated HTTP API on 127.0.0.1 (its contract: GET /v1/openapi.json). stdin and
+stdout don't carry LSP.
+
+  --http-port-file FILE   turn HTTP mode on. Once it listens, the endpoint writes
+                          {"port", "pid", "release", "api"} to FILE, atomically and with
+                          mode 0600, and removes it on shutdown. A FILE left from an
+                          earlier run is removed first. Its folder must exist.
+  --http-settings FILE    the LSP settings, a JSON object, sent in initialize and used to
+                          answer workspace/configuration (default: none)
+
+  FRACTAL_JDTLS_HTTP_TOKEN  required in HTTP mode: the bearer token every request must
+                          send, 32 to 4096 visible ASCII characters. It's never on a
+                          command line and never in Java's environment: the launcher
+                          removes it, and hands it to the endpoint on a pipe.
+
+HTTP mode fixes these, and refuses to start if the settings file or a --jvm-arg sets
+them otherwise: -DwatchParentProcess=false (JDT LS outlives this process: stop it
+with POST /v1/shutdown), -Djava.import.generatesMetadataFilesAtProjectRoot=false,
+java.autobuild.enabled: false and java.configuration.updateBuildConfiguration:
+disabled. It also sets -Dosgi.bundles (the install's start list, plus the endpoint),
+-Declipse.pluginCustomization (lib/http-mode-preferences.ini: lightweight auto-refresh
+off), -Dfractal.jdtls.http.* and the JDK HTTP server's limits (-Dsun.net.httpserver.*,
+-Djdk.httpserver.*), so a --jvm-arg may set none of them. JDT LS gets no other LSP
+transport: -DCLIENT_PORT, -DCLIENT_HOST and --pipe= are refused, the CLIENT_PORT and
+CLIENT_HOST variables are removed, and Java's stdin is /dev/null and its stdout goes
+to stderr. The endpoint logs to
+<data>/.fractal-jdtls/<release>/endpoint.log, and keeps the worktrees it serves in
+<data>/.fractal-jdtls/worktrees.json, so a restart on the same -data serves them again.
+Any startup failure is reported on
+stderr, and JDT LS exits non-zero.
 """
 
 
@@ -106,6 +201,8 @@ class Args:
         self.data: str | None = None
         self.passthrough: list[str] = []
         self.help = False
+        self.http_port_file: str | None = None
+        self.http_settings: str | None = None
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -133,11 +230,20 @@ def parse_args(argv: list[str]) -> Args:
             args.jvm_args.append(value(name, arg))
         elif name == "-data":
             args.data = value(name, arg)
+        elif name == "--http-port-file":
+            args.http_port_file = value(name, arg)
+        elif name == "--http-settings":
+            args.http_settings = value(name, arg)
         elif arg in ("--validate-java-version", "--no-validate-java-version"):
             pass  # accepted for compatibility; the minimum is always checked (design §5)
         else:
             args.passthrough.append(arg)
         i += 1
+    if args.http_settings is not None and args.http_port_file is None:
+        raise UsageError("--http-settings is for HTTP mode: pass --http-port-file too")
+    for option, path in (("--http-port-file", args.http_port_file), ("--http-settings", args.http_settings)):
+        if path == "":
+            raise UsageError(f"{option} needs a file name")
     return args
 
 
@@ -374,6 +480,224 @@ def agent_options(install: Install, jvm_args: list[str]) -> tuple[list[str], lis
     return agent, rest
 
 
+# --- HTTP mode (design §11) ---------------------------------------------------------
+
+
+def read_properties(text: str) -> dict[str, str]:
+    """A Java properties file's keys and values (java.util.Properties.load's rules)."""
+    escapes = {"t": "\t", "n": "\n", "r": "\r", "f": "\f"}
+
+    def unescape(raw: str) -> str:
+        out, i = [], 0
+        while i < len(raw):
+            char = raw[i]
+            if char == "\\" and i + 1 < len(raw):
+                nxt = raw[i + 1]
+                if nxt == "u" and re.fullmatch(r"[0-9A-Fa-f]{4}", raw[i + 2 : i + 6]):
+                    out.append(chr(int(raw[i + 2 : i + 6], 16)))
+                    i += 6
+                    continue
+                out.append(escapes.get(nxt, nxt))
+                i += 2
+                continue
+            out.append(char)
+            i += 1
+        return "".join(out)
+
+    properties: dict[str, str] = {}
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].lstrip(" \t\f")
+        i += 1
+        if not line or line[0] in "#!":
+            continue
+        # A line ending in an odd number of backslashes continues on the next.
+        while (len(line) - len(line.rstrip("\\"))) % 2 == 1 and i < len(lines):
+            line = line[:-1] + lines[i].lstrip(" \t\f")
+            i += 1
+        match = re.match(r"((?:\\.|[^=:\s\\])*)\s*[=:]?\s*(.*)$", line, re.S)
+        properties[unescape(match.group(1))] = unescape(match.group(2))
+    return properties
+
+
+def property_value(arg: str, name: str) -> str | None:
+    """The value a JVM option -D<name>[=value] sets, or None if it sets another property."""
+    if arg == name:
+        return ""
+    if arg.startswith(name + "="):
+        return arg[len(name) + 1 :]
+    return None
+
+
+class HttpMode:
+    """HTTP mode's checked inputs: the port file, settings file, token and start list."""
+
+    def __init__(self, install: Install, args: Args, environ, java_environ, cwd: str, java: str, data: str):
+        self.token = http_token(environ)
+        self.removed = [name for name in TRANSPORT_VARIABLES if name in environ]
+        for arg in args.jvm_args:
+            if arg.startswith(HTTP_PROPERTY):
+                raise UsageError(f"--jvm-arg={arg}: HTTP mode sets {HTTP_PROPERTY}* itself")
+            if arg.startswith(SERVER_PROPERTIES):
+                raise UsageError(f"--jvm-arg={arg}: HTTP mode sets the JDK HTTP server's limits itself")
+            if any(property_value(arg, f"-D{name}") is not None for name in TRANSPORT_VARIABLES):
+                raise UsageError(f"--jvm-arg={arg}: HTTP mode allows JDT LS no LSP transport but the endpoint's (no client socket)")
+            if property_value(arg, OSGI_BUNDLES) is not None:
+                raise UsageError(
+                    f"--jvm-arg={arg}: HTTP mode sets {OSGI_BUNDLES} itself, to the install's start list plus the endpoint"
+                )
+            if property_value(arg, PLUGIN_CUSTOMIZATION) is not None:
+                raise UsageError(f"--jvm-arg={arg}: HTTP mode sets {PLUGIN_CUSTOMIZATION} itself, to {HTTP_PREFERENCES}")
+            for name, fixed in HTTP_FIXED.items():
+                value = property_value(arg, name)
+                if value is not None and value != fixed:
+                    raise UsageError(f"--jvm-arg={arg}: HTTP mode fixes {name}={fixed}")
+        for arg in args.passthrough:
+            if arg.lower() == PLUGIN_CUSTOMIZATION_ARG:
+                raise UsageError(f"{arg}: HTTP mode sets {PLUGIN_CUSTOMIZATION} itself, to {HTTP_PREFERENCES}")
+            if PIPE_ARG in arg or any(property_value(arg, f"-D{name}") is not None for name in TRANSPORT_VARIABLES):
+                raise UsageError(f"{arg}: HTTP mode allows JDT LS no LSP transport but the endpoint's (no {PIPE_ARG} or client socket)")
+        self.port_file = self.checked_port_file(install, os.path.join(cwd, args.http_port_file))
+        self.settings = None
+        if args.http_settings is not None:
+            self.settings = os.path.abspath(os.path.join(cwd, args.http_settings))
+            if not os.path.isfile(self.settings) or not os.access(self.settings, os.R_OK):
+                raise UsageError(f"--http-settings {args.http_settings}: no readable file {self.settings}")
+        endpoint = install.release_dir / ENDPOINT_JAR
+        if UNSAFE_LOCATION_RE.search(str(endpoint)):
+            raise LaunchError(
+                f"the install's path {install.release_dir} has a character Equinox's start list can't hold "
+                "(a comma, @, %, #, ? or white space), so the endpoint can't be loaded from it. Install to another root."
+            )
+        config_ini = install.eclipse / SHARED_CONFIGURATION / "config.ini"
+        try:
+            stock = read_properties(config_ini.read_text(encoding="utf-8")).get("osgi.bundles", "")
+        except (OSError, UnicodeDecodeError) as error:
+            raise LaunchError(f"can't read {config_ini}: {error}") from None
+        if not stock:
+            raise LaunchError(f"{config_ini} has no osgi.bundles start list, so the endpoint can't be added to it.")
+        self.bundles = f"{stock},reference:file:{endpoint}@4:start"
+        self.preferences = install.release_dir / HTTP_PREFERENCES
+        self.log = os.path.join(data, ".fractal-jdtls", install.release, "endpoint.log")
+        # Not per release: the registered worktrees belong to the Eclipse workspace, -data.
+        self.state = os.path.join(data, ".fractal-jdtls", "worktrees.json")
+        self.release = install.release
+        check_http_server_module(java, java_environ)
+
+    @staticmethod
+    def checked_port_file(install: Install, path: str) -> str:
+        path = os.path.abspath(path)
+        if is_within(path, install.release_dir):
+            raise UsageError(f"--http-port-file {path} is inside the install {install.release_dir}; nothing may be written there")
+        folder = os.path.dirname(path)
+        if not os.path.isdir(folder):
+            raise UsageError(f"--http-port-file {path}: its folder {folder} doesn't exist")
+        if os.path.isdir(path) and not os.path.islink(path):
+            raise UsageError(f"--http-port-file {path} is a folder")
+        return path
+
+    def options(self, token_fd: int) -> list[str]:
+        """The JVM options HTTP mode adds, after the client's."""
+        options = [
+            f"{OSGI_BUNDLES}={self.bundles}",
+            *(f"{name}={value}" for name, value in HTTP_FIXED.items()),
+            f"{PLUGIN_CUSTOMIZATION}={self.preferences}",
+            *(f"{name}={value}" for name, value in SERVER_LIMITS.items()),
+            f"{HTTP_PROPERTY}portFile={self.port_file}",
+        ]
+        if self.settings is not None:
+            options.append(f"{HTTP_PROPERTY}settings={self.settings}")
+        options += [
+            f"{HTTP_PROPERTY}log={self.log}",
+            f"{HTTP_PROPERTY}state={self.state}",
+            f"{HTTP_PROPERTY}release={self.release}",
+            f"{HTTP_PROPERTY}tokenFd={token_fd}",
+        ]
+        return options
+
+
+def http_token(environ) -> bytes:
+    """The token from the environment, checked; never printed."""
+    token = environ.get(TOKEN_ENV)
+    if token is None or token == "":
+        raise LaunchError(
+            f"HTTP mode needs a token: set {TOKEN_ENV} to {TOKEN_MIN} to {TOKEN_MAX} visible ASCII characters, "
+            "such as the output of: python3 -c 'import secrets; print(secrets.token_urlsafe(32))'"
+        )
+    if not TOKEN_MIN <= len(token) <= TOKEN_MAX:
+        raise LaunchError(
+            f"{TOKEN_ENV} has {len(token)} characters; HTTP mode needs {TOKEN_MIN} to {TOKEN_MAX}."
+        )
+    if not TOKEN_RE.match(token):
+        raise LaunchError(f"{TOKEN_ENV} must be visible ASCII characters only, with no spaces.")
+    return token.encode("ascii")
+
+
+def check_http_server_module(java: str, environ) -> None:
+    """The endpoint imports com.sun.net.httpserver, from the JDK's jdk.httpserver module."""
+    try:
+        result = subprocess.run(
+            [java, "--list-modules"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=environ,
+            text=True,
+            errors="replace",
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise LaunchError(f"running {java} --list-modules failed: {error}.") from None
+    if result.returncode != 0 or not any(line.startswith("jdk.httpserver@") for line in result.stdout.splitlines()):
+        raise LaunchError(
+            f"{java} has no jdk.httpserver module, which HTTP mode's endpoint needs. Use a full JDK "
+            "(--java-executable or JAVA_HOME), not a runtime image without it."
+        )
+
+
+def java_environment(environ) -> dict:
+    """HTTP mode's environment for Java: without the token, and without JDT LS's client-socket variables."""
+    return {name: value for name, value in environ.items() if name != TOKEN_ENV and name not in TRANSPORT_VARIABLES}
+
+
+def redirect_stdio() -> None:
+    """HTTP mode: Java's stdin is /dev/null and its stdout is stderr, so no LSP peer is on either."""
+    null = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(null, 0)
+    os.close(null)
+    os.dup2(2, 1)
+
+
+def token_pipe(token: bytes) -> int:
+    """A pipe holding the token, with its write end closed: the inheritable read end's descriptor."""
+    read_end, write_end = os.pipe()  # neither is inherited by default (PEP 446)
+    try:
+        view = memoryview(token)
+        while view:  # far below the pipe's capacity, so this never blocks
+            view = view[os.write(write_end, view) :]
+    finally:
+        os.close(write_end)
+    os.set_inheritable(read_end, True)
+    return read_end
+
+
+class Launch:
+    """The java command, and in HTTP mode the token and the environment to start it with."""
+
+    def __init__(self, command: list[str], http: HttpMode | None = None, environ=None, http_at: int = 0):
+        self.command = command
+        self.http = http
+        self.environ = environ
+        self.http_at = http_at
+
+    def with_token_fd(self, token_fd: int) -> list[str]:
+        """The command, with HTTP mode's options, the token's descriptor among them."""
+        if self.http is None:
+            return self.command
+        return self.command[: self.http_at] + self.http.options(token_fd) + self.command[self.http_at :]
+
+
 def java_command(install: Install, java: str, major: int, args: Args, data: str, configuration: str | None) -> list[str]:
     """The stock launcher's command, with the agent and a configuration area outside the install.
 
@@ -395,12 +719,14 @@ def java_command(install: Install, java: str, major: int, args: Args, data: str,
 # --- main --------------------------------------------------------------------------
 
 
-def prepare(argv: list[str], release_dir: Path, environ, cwd: str) -> list[str]:
+def prepare(argv: list[str], release_dir: Path, environ, cwd: str) -> Launch:
     """Everything before exec: the verified install, Java, the folders and the command."""
     args = parse_args(argv)
     install = Install(release_dir)
     java, source = find_java(args.java_executable, environ)
-    major = java_major_version(java, environ)
+    # In HTTP mode no Java the launcher starts, its checks included, sees the token or a transport variable.
+    java_environ = environ if args.http_port_file is None else java_environment(environ)
+    major = java_major_version(java, java_environ)
     if major < install.java_minimum:
         raise LaunchError(
             f"fractal-jdtls {install.release} (JDT LS {install.jdtls_version}) needs Java {install.java_minimum} "
@@ -426,6 +752,8 @@ def prepare(argv: list[str], release_dir: Path, environ, cwd: str) -> list[str]:
                 f"-configuration {spec} is inside the install {release_dir}; nothing may be written there, "
                 "so pass a folder outside it, or no -configuration"
             )
+    # HTTP mode's checks come before anything is written, so a refused start writes nothing.
+    http = None if args.http_port_file is None else HttpMode(install, args, environ, java_environ, cwd, java, data)
     configuration = None
     if "-configuration" not in args.passthrough:
         configuration = configuration_area(data, install.release)
@@ -435,7 +763,16 @@ def prepare(argv: list[str], release_dir: Path, environ, cwd: str) -> list[str]:
             raise LaunchError(
                 f"can't create the configuration area {configuration}: {error.strerror}. Pass a writable -data."
             ) from None
-    return java_command(install, java, major, args, data_arg, configuration)
+    command = java_command(install, java, major, args, data_arg, configuration)
+    if http is None:
+        return Launch(command)
+    try:
+        os.makedirs(os.path.dirname(http.log), exist_ok=True)
+        if os.path.lexists(http.port_file):
+            os.unlink(http.port_file)  # left from an earlier run: the file appears only once this one listens
+    except OSError as error:
+        raise LaunchError(f"{error.filename}: {error.strerror}") from None
+    return Launch(command, http, java_environ, command.index("-jar"))
 
 
 def is_within(path: str, folder: Path) -> bool:
@@ -443,7 +780,15 @@ def is_within(path: str, folder: Path) -> bool:
     return path == folder_ or path.startswith(folder_ + os.sep)
 
 
-def main(argv=None, release_dir: Path | None = None, environ=None, cwd: str | None = None, execv=os.execv) -> int:
+def main(
+    argv=None,
+    release_dir: Path | None = None,
+    environ=None,
+    cwd: str | None = None,
+    execv=os.execv,
+    execve=os.execve,
+    redirect=redirect_stdio,
+) -> int:
     argv = sys.argv[1:] if argv is None else argv
     environ = os.environ if environ is None else environ
     release_dir = Path(os.path.realpath(release_dir or Path(__file__).resolve().parent.parent))
@@ -451,7 +796,7 @@ def main(argv=None, release_dir: Path | None = None, environ=None, cwd: str | No
         if parse_args(argv).help:
             sys.stderr.write(USAGE)
             return 0
-        command = prepare(argv, release_dir, environ, cwd or os.getcwd())
+        launch = prepare(argv, release_dir, environ, cwd or os.getcwd())
     except UsageError as error:
         print(f"jdtls: error: {error}\n(jdtls --help shows the options)", file=sys.stderr)
         return 2
@@ -464,9 +809,18 @@ def main(argv=None, release_dir: Path | None = None, environ=None, cwd: str | No
         return 1
     sys.stderr.flush()
     try:
-        execv(command[0], command)
+        if launch.http is None:
+            execv(launch.command[0], launch.command)
+        else:
+            for name in launch.http.removed:
+                print(f"jdtls: HTTP mode: {name} removed from Java's environment; JDT LS's only LSP peer is the endpoint", file=sys.stderr)
+            # The token reaches Java only on the pipe: never on the command line or in its environment.
+            command = launch.with_token_fd(token_pipe(launch.http.token))
+            sys.stderr.flush()
+            redirect()
+            execve(command[0], command, launch.environ)
     except OSError as error:
-        print(f"jdtls: error: can't start {command[0]}: {error.strerror or error}", file=sys.stderr)
+        print(f"jdtls: error: can't start {launch.command[0]}: {error.strerror or error}", file=sys.stderr)
         return 1
     return 0  # only when execv is a test's stand-in
 

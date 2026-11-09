@@ -38,7 +38,10 @@ def main():
     sys.dont_write_bytecode = True  # nothing is written into the install
     release_dir = Path(os.path.realpath(sys.argv[1]))
     launcher = load_launcher(release_dir)
-    command = without_agent(launcher.prepare(sys.argv[2:], release_dir, os.environ, os.getcwd()), release_dir)
+    launch = launcher.prepare(sys.argv[2:], release_dir, os.environ, os.getcwd())
+    if launch.http is not None:
+        raise SystemExit("launch_without_agent: the control run is plain mode only; drop --http-port-file")
+    command = without_agent(launch.command, release_dir)
     print("launch_without_agent: " + " ".join(command), file=sys.stderr, flush=True)
     os.execv(command[0], command)
 

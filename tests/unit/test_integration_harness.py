@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The integration suite's own helpers (tests/integration), without JDT LS.
 
-Paths with a space and an `&`, as a scratch root (TMPDIR, --basetemp or the Maven cache) may
+Paths with a space and an `&`, as a scratch root (FRACTAL_JDTLS_TEST_SCRATCH or the Maven cache) may
 have; and the LSP client's wait for a step's quiet, against a fake server.
 """
 

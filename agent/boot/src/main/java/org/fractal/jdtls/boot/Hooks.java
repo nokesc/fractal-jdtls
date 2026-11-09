@@ -12,7 +12,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * then reports each one as its class loads: in place when its matcher selected exactly one
  * method and the class transformed, not in place otherwise. A hook whose class never loads is
  * reported at the checkpoint, the first return from {@code populateClasspath}, or, when
- * {@code populateClasspath} itself was never advised, at JVM shutdown, provided another hook was.
+ * {@code populateClasspath} itself was never advised, at JVM shutdown, provided a Maven project
+ * was read: a naming or requester hook ran ({@link #mavenProjectRead()}). m2e's resolution
+ * classes load at startup even in a workspace with no Maven project, so a hook in place doesn't
+ * show that one was read.
  */
 public final class Hooks {
 
@@ -35,6 +38,7 @@ public final class Hooks {
     private static final Map<String, State> STATES = new LinkedHashMap<>();
     private static final AtomicBoolean CHECKPOINT = new AtomicBoolean();
     private static final AtomicBoolean SHUTDOWN_HOOK = new AtomicBoolean();
+    private static final AtomicBoolean MAVEN_PROJECT_READ = new AtomicBoolean();
 
     private Hooks() {}
 
@@ -95,6 +99,16 @@ public final class Hooks {
         Report.flush();
     }
 
+    /**
+     * A naming or requester hook ran, so a Maven project is being read: from now on, shutdown
+     * reports the hooks whose class never loaded. Called on every such call; cheap after the first.
+     */
+    public static void mavenProjectRead() {
+        if (!MAVEN_PROJECT_READ.get()) {
+            MAVEN_PROJECT_READ.set(true);
+        }
+    }
+
     /** Whether the checkpoint has passed. */
     public static boolean checkpointPassed() {
         return CHECKPOINT.get();
@@ -104,7 +118,7 @@ public final class Hooks {
         boolean report;
         synchronized (Hooks.class) {
             report = !CHECKPOINT.get() && STATES.get(CHECKPOINT_HOOK) != State.IN_PLACE
-                    && STATES.containsValue(State.IN_PLACE);
+                    && MAVEN_PROJECT_READ.get();
         }
         if (report) {
             reportNeverLoaded("by shutdown, and populateClasspath was never advised");
@@ -144,5 +158,6 @@ public final class Hooks {
         HOOKS.clear();
         STATES.clear();
         CHECKPOINT.set(false);
+        MAVEN_PROJECT_READ.set(false);
     }
 }

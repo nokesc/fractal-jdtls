@@ -1,0 +1,192 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!--
+  The endpoint bundle (design §11): an OSGi bundle that JDT LS's Equinox starts in
+  HTTP mode, with a hand-written manifest (src/main/manifest/MANIFEST.MF).
+
+  It compiles against the pinned JDT LS's own jars, from the build cache that
+  tools/jdtls_cache.py fills and verifies against pin.json (mise run build runs it
+  first). They're system-scoped, so Maven reads them where they are and never copies
+  them into ~/.m2; the bundle ships none of them. The folder is the tarball's SHA-256,
+  and the jars are named as pin.json names them: tests/unit/test_endpoint_bundle.py
+  checks both against pin.json.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.fractal.jdtls</groupId>
+    <artifactId>fractal-jdtls-parent</artifactId>
+    <version>0-dev</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>fractal-jdtls-endpoint</artifactId>
+  <name>Fractal JDT LS endpoint</name>
+
+  <properties>
+    <!-- The build cache's folder of the pinned JDT LS (tools/jdtls_cache.py). -->
+    <jdtls.plugins>${project.basedir}/../.cache/jdtls/b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4/plugins</jdtls.plugins>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>pinned.jdtls</groupId>
+      <artifactId>org.eclipse.osgi</artifactId>
+      <version>pinned</version>
+      <scope>system</scope>
+      <systemPath>${jdtls.plugins}/org.eclipse.osgi_3.25.0.v20261008-2211.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>pinned.jdtls</groupId>
+      <artifactId>com.google.gson</artifactId>
+      <version>pinned</version>
+      <scope>system</scope>
+      <systemPath>${jdtls.plugins}/com.google.gson_2.14.0.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>pinned.jdtls</groupId>
+      <artifactId>org.eclipse.jdt.ls.core</artifactId>
+      <version>pinned</version>
+      <scope>system</scope>
+      <systemPath>${jdtls.plugins}/org.eclipse.jdt.ls.core_1.63.0.202610191322.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>pinned.jdtls</groupId>
+      <artifactId>org.eclipse.core.runtime</artifactId>
+      <version>pinned</version>
+      <scope>system</scope>
+      <systemPath>${jdtls.plugins}/org.eclipse.core.runtime_3.35.100.v20260910-1515.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>pinned.jdtls</groupId>
+      <artifactId>org.eclipse.equinox.app</artifactId>
+      <version>pinned</version>
+      <scope>system</scope>
+      <systemPath>${jdtls.plugins}/org.eclipse.equinox.app_1.7.600.v20251211-1038.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>pinned.jdtls</groupId>
+      <artifactId>org.eclipse.equinox.common</artifactId>
+      <version>pinned</version>
+      <scope>system</scope>
+      <systemPath>${jdtls.plugins}/org.eclipse.equinox.common_3.21.100.v20260829-1451.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>pinned.jdtls</groupId>
+      <artifactId>org.eclipse.core.jobs</artifactId>
+      <version>pinned</version>
+      <scope>system</scope>
+      <systemPath>${jdtls.plugins}/org.eclipse.core.jobs_3.15.900.v20260604-0622.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>pinned.jdtls</groupId>
+      <artifactId>org.eclipse.core.resources</artifactId>
+      <version>pinned</version>
+      <scope>system</scope>
+      <systemPath>${jdtls.plugins}/org.eclipse.core.resources_3.25.0.v20261010-1447.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>pinned.jdtls</groupId>
+      <artifactId>org.eclipse.m2e.core</artifactId>
+      <version>pinned</version>
+      <scope>system</scope>
+      <systemPath>${jdtls.plugins}/org.eclipse.m2e.core_2.8.0.20260815-0704.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>pinned.jdtls</groupId>
+      <artifactId>org.eclipse.equinox.preferences</artifactId>
+      <version>pinned</version>
+      <scope>system</scope>
+      <systemPath>${jdtls.plugins}/org.eclipse.equinox.preferences_3.12.100.v20251111-0704.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>pinned.jdtls</groupId>
+      <artifactId>org.eclipse.jdt.core</artifactId>
+      <version>pinned</version>
+      <scope>system</scope>
+      <systemPath>${jdtls.plugins}/org.eclipse.jdt.core_3.48.0.v20261007-1246.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>pinned.jdtls</groupId>
+      <artifactId>org.eclipse.jdt.core.manipulation</artifactId>
+      <version>pinned</version>
+      <scope>system</scope>
+      <systemPath>${jdtls.plugins}/org.eclipse.jdt.core.manipulation_1.26.0.v20261009-1526.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>pinned.jdtls</groupId>
+      <artifactId>org.eclipse.ltk.core.refactoring</artifactId>
+      <version>pinned</version>
+      <scope>system</scope>
+      <systemPath>${jdtls.plugins}/org.eclipse.ltk.core.refactoring_3.17.0.v20261010-1449.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>pinned.jdtls</groupId>
+      <artifactId>org.eclipse.lsp4j</artifactId>
+      <version>pinned</version>
+      <scope>system</scope>
+      <systemPath>${jdtls.plugins}/org.eclipse.lsp4j_1.0.0.v20260209-1721.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>pinned.jdtls</groupId>
+      <artifactId>org.eclipse.lsp4j.jsonrpc</artifactId>
+      <version>pinned</version>
+      <scope>system</scope>
+      <systemPath>${jdtls.plugins}/org.eclipse.lsp4j.jsonrpc_1.0.0.v20260209-1721.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>pinned.jdtls</groupId>
+      <artifactId>org.eclipse.text</artifactId>
+      <version>pinned</version>
+      <scope>system</scope>
+      <systemPath>${jdtls.plugins}/org.eclipse.text_3.14.900.v20261012-1310.jar</systemPath>
+    </dependency>
+    <dependency>
+      <!-- Not imported by the bundle: Eclipse's ResourcesPlugin needs it to load outside OSGi, in JobsTest. -->
+      <groupId>pinned.jdtls</groupId>
+      <artifactId>org.osgi.service.prefs</artifactId>
+      <version>pinned</version>
+      <scope>system</scope>
+      <systemPath>${jdtls.plugins}/org.osgi.service.prefs_1.1.2.202109301733.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>fractal-jdtls-endpoint</finalName>
+    <plugins>
+      <plugin>
+        <!-- The JDK HTTP server's limits that HTTP mode fixes (ServerLimits), as the launcher passes them. -->
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <systemPropertyVariables>
+            <sun.net.httpserver.maxReqTime>10</sun.net.httpserver.maxReqTime>
+            <sun.net.httpserver.maxRspTime>3900</sun.net.httpserver.maxRspTime>
+            <sun.net.httpserver.drainAmount>0</sun.net.httpserver.drainAmount>
+            <jdk.httpserver.maxConnections>256</jdk.httpserver.maxConnections>
+          </systemPropertyVariables>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <configuration>
+          <!-- The archiver doesn't compare the manifest file with the jar, so a change to the manifest alone would leave
+               the old jar in place: always write it. -->
+          <forceCreation>true</forceCreation>
+          <archive>
+            <manifestFile>src/main/manifest/MANIFEST.MF</manifestFile>
+          </archive>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

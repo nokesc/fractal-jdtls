@@ -21,8 +21,8 @@ depends = ["build"]
 run = "python -m pytest"
 
 [tasks.build]
-description = "Build the agent jar and the boot jar with Maven (agent/*/target/), running the agent's JUnit tests"
-run = "mvn --batch-mode --no-transfer-progress package"
+description = "Build the agent jar, the boot jar and the endpoint bundle with Maven (agent/*/target/, endpoint/target/), running their JUnit tests; first fills and verifies the build cache of the pinned JDT LS (.cache/jdtls, tools/jdtls_cache.py), which needs network once"
+run = ["python tools/jdtls_cache.py", "mvn --batch-mode --no-transfer-progress package"]
 
 [tasks.pin]
 description = "Maintainers: re-pin JDT LS into pin.json and .context/pins/ (tools/pin.py <version> [--release n])"
@@ -40,7 +40,22 @@ run = "python tools/release_tag.py"
 [tasks."test:integration"]
 description = "Run the integration suite (tests/integration): real JDT LS, installed from a built release zip into a scratch root, on a main checkout and two worktrees. Needs network; Maven cache in $FRACTAL_JDTLS_TEST_CACHE, else .cache/integration"
 depends = ["build"]
-run = "python -m pytest tests/integration"
+run = "python -m pytest tests/integration -m 'not imports and not run05 and not soak'"
+
+[tasks."test:imports"]
+description = "Run the 20 large-tree imports with requests held during each (tests/integration/test_imports.py, marker imports; about 10 minutes): each in a fresh process, -data and generated tree. Not part of the gate, which runs one. FRACTAL_JDTLS_IMPORTS sets the count"
+depends = ["build"]
+run = "python -m pytest tests/integration/test_imports.py -m imports -s"
+
+[tasks."test:run05"]
+description = "Run run 05 through build on 20 fresh copies (tests/integration/test_run05_fresh.py, marker run05; about 5 minutes): each a fresh fixture, process and -data. Not part of the gate, which runs 2. FRACTAL_JDTLS_RUN05 sets the count"
+depends = ["build"]
+run = "python -m pytest tests/integration/test_run05_fresh.py -m run05 -s"
+
+[tasks."test:soak"]
+description = "Run the several-sessions scenario for 10 minutes (tests/integration/test_sessions.py, marker soak): four sessions, one per worktree, in one JDT LS. Not part of the gate, which runs it for a minute. FRACTAL_JDTLS_SOAK_SECONDS sets the time"
+depends = ["build"]
+run = "python -m pytest tests/integration/test_sessions.py -m soak -s"
 
 [tasks.validate]
 description = "Run the complete release gate: the jar build with its JUnit tests, the pytest unit tests, the release zip, then the integration suite"

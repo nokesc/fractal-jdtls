@@ -9,7 +9,7 @@ Run it from the unzipped release:
 
 It installs the release it ships in into ``<root>/<release>/``:
 
-- this release's own files (``bin/``, the agent and boot jars in ``lib/``,
+- this release's own files (``bin/``, the agent, boot and endpoint jars in ``lib/``,
   ``pin.json``, ``LICENSE``, ``NOTICE``), checked against the release's
   ``release-files.json`` and copied from the release folder with it;
 - JDT LS into ``eclipse/``, downloaded from Eclipse; the tarball's SHA-256 is checked
@@ -66,6 +66,8 @@ HASHED_FILES = (
     "bin/jdtls",
     "lib/fractal-jdtls-agent.jar",
     "lib/fractal-jdtls-boot.jar",
+    "lib/fractal-jdtls-endpoint.jar",
+    "lib/http-mode-preferences.ini",
     "pin.json",
     "LICENSE",
     "NOTICE",

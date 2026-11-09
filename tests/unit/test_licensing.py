@@ -7,7 +7,8 @@ ROOT = Path(__file__).resolve().parents[2]
 SPDX = "SPDX-License-Identifier: Apache-2.0"
 SOURCE_SUFFIXES = {".py", ".java", ".sh", ".toml", ".xml"}
 SOURCE_DIRS_ANY_SUFFIX = {"bin"}
-SKIPPED_DIRS = {".git", ".venv", ".cache", ".context", "target", "build", "dist", "__pycache__", ".pytest_cache"}
+# temp/ is the governor's run folder, ignored by Git (.gitignore): not the repository's sources.
+SKIPPED_DIRS = {".git", ".venv", ".cache", ".context", "target", "build", "dist", "__pycache__", ".pytest_cache", "temp"}
 
 
 def source_files():

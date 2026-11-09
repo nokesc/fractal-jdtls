@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!--
-  Builds the agent jar and the boot jar (design §6). The Maven version is not
-  the release ID: that comes only from pin.json (design §2), and the jars carry
-  no version in their names.
+  Builds the agent jar and the boot jar (design §6), and the endpoint bundle
+  (design §11). The Maven version is not the release ID: that comes only from
+  pin.json (design §2), and the jars carry no version in their names.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -26,6 +26,7 @@
   <modules>
     <module>agent/boot</module>
     <module>agent/agent</module>
+    <module>endpoint</module>
   </modules>
 
   <properties>

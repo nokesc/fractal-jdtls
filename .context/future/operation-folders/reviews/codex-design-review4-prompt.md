@@ -1,0 +1,3 @@
+Round 2 of at most 3. You reviewed temp/governor/T002/opfolders-v3-proposal.md in temp/governor/T002/design-review3.md (S1–S5). The governor revised the proposal (same file) to answer them. Re-review the revised proposal against the code as needed. Don't modify anything.
+
+Your final message, in Markdown: a one-line verdict; for each of S1–S5 "resolved", "partly resolved: <what's left>" or "not resolved: <why>"; then only new findings that matter for correctness, stability or security (T1, T2, …) with severity and a concrete fix. Also say, in one line, whether anything in the proposal is still over-built for Chris's goals (stability over everything; Git and Fractal Harness already provide history, undo and checkpoints). Finish within 6 minutes.

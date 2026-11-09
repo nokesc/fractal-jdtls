@@ -56,6 +56,7 @@ public final class Boot {
     /** Exit advice: the project name for {@code model}, given m2e's {@code name}. */
     public static String projectName(Object model, String name) {
         Report.flush();
+        Hooks.mavenProjectRead();
         try {
             File pom = (File) Reflect.call(model, "getPomFile");
             return projectName(pom, name);
@@ -81,6 +82,7 @@ public final class Boot {
     /** Enter advice on {@code DefaultClasspathManagerDelegate.populateClasspath(…, facade, …)}. */
     public static File populateClasspathEnter(Object facade) {
         Report.flush();
+        Hooks.mavenProjectRead();
         File previous = REQUESTER.get();
         try {
             REQUESTER.set(Reflect.toFile(Reflect.call(facade, "getPom")));
@@ -113,6 +115,7 @@ public final class Boot {
      */
     private static File mavenRequesterEnter(Object child, String getter, String site) {
         Report.flush();
+        Hooks.mavenProjectRead();
         File previous = REQUESTER.get();
         try {
             File pom = (File) Reflect.call(child, getter);

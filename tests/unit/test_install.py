@@ -154,6 +154,8 @@ def make_release(folder: Path, pin: dict) -> Path:
     (folder / "bin" / "jdtls").write_text("#!/usr/bin/env python3\n# launcher\n")
     (folder / "lib" / "fractal-jdtls-agent.jar").write_bytes(b"agent jar\n")
     (folder / "lib" / "fractal-jdtls-boot.jar").write_bytes(b"boot jar\n")
+    (folder / "lib" / "fractal-jdtls-endpoint.jar").write_bytes(b"endpoint jar\n")
+    (folder / "lib" / "http-mode-preferences.ini").write_text("# preferences\n")
     (folder / "LICENSE").write_text("Apache License\n")
     (folder / "NOTICE").write_text("Fractal JDT LS\n")
     write_pin(folder, pin)
@@ -560,10 +562,10 @@ def test_verify_passes_on_a_good_install(world, capsys):
     assert run_install(world, "--verify") == 0
     out = capsys.readouterr().out
     assert f"{world.target} verifies: all {len(expected_tree())} files are present" in out
-    assert f"this release's own 7 match {world.release / 'release-files.json'}" in out
+    assert f"this release's own 9 match {world.release / 'release-files.json'}" in out
 
     assert install.main(["--verify"], release_dir=world.target) == 0  # the installed copy
-    assert f"this release's own 7 match {world.target / 'release-files.json'}" in capsys.readouterr().out
+    assert f"this release's own 9 match {world.target / 'release-files.json'}" in capsys.readouterr().out
     assert (world.target / "release-files.json").read_bytes() == (world.release / "release-files.json").read_bytes()
 
 
@@ -599,7 +601,9 @@ def test_verify_names_missing_extra_and_changed_files(world, capsys):
     assert [line.strip() for line in capsys.readouterr().err.splitlines() if line.startswith("  ")] == lines
 
 
-@pytest.mark.parametrize("name", ["lib/fractal-jdtls-agent.jar", "lib/fractal-jdtls-boot.jar", "bin/jdtls", "pin.json", "NOTICE"])
+@pytest.mark.parametrize(
+    "name", ["lib/fractal-jdtls-agent.jar", "lib/fractal-jdtls-boot.jar", "lib/fractal-jdtls-endpoint.jar", "bin/jdtls", "pin.json", "NOTICE"]
+)
 def test_verify_from_the_install_detects_a_changed_release_file(world, capsys, name):
     assert run_install(world) == 0
     tamper(world.target / name)
@@ -675,6 +679,10 @@ def repo(world, tmp_path):
     agent_jar(repo / "agent/agent/target/fractal-jdtls-agent.jar", f"byte-buddy-{BB_VERSION}.jar")
     (repo / "agent/boot/target").mkdir(parents=True)
     (repo / "agent/boot/target/fractal-jdtls-boot.jar").write_bytes(b"boot jar\n")
+    (repo / "endpoint/target").mkdir(parents=True)
+    (repo / "endpoint/target/fractal-jdtls-endpoint.jar").write_bytes(b"endpoint jar\n")
+    (repo / "endpoint/src/main/preferences").mkdir(parents=True)
+    shutil.copy(ROOT / "endpoint/src/main/preferences/http-mode-preferences.ini", repo / "endpoint/src/main/preferences")
     return repo
 
 
@@ -696,6 +704,8 @@ def test_release_zip_has_the_design_layout_and_is_reproducible(repo, tmp_path):
         f"{top}/bin/jdtls": 0o100755,
         f"{top}/lib/fractal-jdtls-agent.jar": 0o100644,
         f"{top}/lib/fractal-jdtls-boot.jar": 0o100644,
+        f"{top}/lib/fractal-jdtls-endpoint.jar": 0o100644,
+        f"{top}/lib/http-mode-preferences.ini": 0o100644,
         f"{top}/pin.json": 0o100644,
         f"{top}/release-files.json": 0o100644,
     }

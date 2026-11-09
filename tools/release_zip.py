@@ -3,8 +3,8 @@
 """Build the release zip, build/fractal-jdtls-<release>.zip (design §2).
 
 It holds this project's files only, under one top folder ``fractal-jdtls-<release>/``:
-``bin/install.py``, ``bin/jdtls``, the agent and boot jars from ``mise run build`` in
-``lib/``, ``pin.json``, ``LICENSE`` and ``NOTICE``, and ``release-files.json``, which
+``bin/install.py``, ``bin/jdtls``, the agent, boot and endpoint jars from ``mise run build``
+in ``lib/``, ``pin.json``, ``LICENSE`` and ``NOTICE``, and ``release-files.json``, which
 records the release ID and the SHA-256 of every other file in the zip (design §4). The
 release ID is pin.json's ``release``. The zip is reproducible: entries are sorted, and every entry has the root
 POM's ``project.build.outputTimestamp`` and a fixed mode.
@@ -35,6 +35,8 @@ SOURCES = {
     "bin/jdtls": "bin/jdtls",
     "lib/fractal-jdtls-agent.jar": "agent/agent/target/fractal-jdtls-agent.jar",
     "lib/fractal-jdtls-boot.jar": "agent/boot/target/fractal-jdtls-boot.jar",
+    "lib/fractal-jdtls-endpoint.jar": "endpoint/target/fractal-jdtls-endpoint.jar",
+    "lib/http-mode-preferences.ini": "endpoint/src/main/preferences/http-mode-preferences.ini",
     "pin.json": "pin.json",
     "LICENSE": "LICENSE",
     "NOTICE": "NOTICE",

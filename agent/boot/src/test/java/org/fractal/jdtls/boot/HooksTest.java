@@ -86,6 +86,7 @@ class HooksTest {
     @Test
     void atShutdownWithoutPopulateClasspathTheMissingHooksAreReported() {
         Hooks.inPlace("getProjectName", "loader");
+        Hooks.mavenProjectRead();
         String err = Fakes.stderr(Hooks::shutdown);
         assertEquals(2, err.lines().count(), err);
         assertTrue(err.contains("hook populateClasspath (m2e.DefaultClasspathManagerDelegate.populateClasspath(…)) is not"
@@ -98,15 +99,38 @@ class HooksTest {
         assertEquals("", Fakes.stderr(Hooks::shutdown), "a workspace with no Maven projects reports nothing");
     }
 
+    /**
+     * T002.03 found it: with no Maven project, m2e's resolution classes and Maven's requester classes still load at
+     * startup, and their hooks are in place, but nothing reads a Maven project, so populateClasspath's class never
+     * loads. That's a workspace with no Maven projects, which reports nothing (design §6).
+     */
+    @Test
+    void atShutdownNothingIsReportedWhenHooksAreInPlaceButNoMavenProjectWasRead() {
+        Hooks.inPlace("getProjectName", "loader");
+        Hooks.inPlace("initParent", "loader");
+        assertEquals("", Fakes.stderr(Hooks::shutdown));
+        assertEquals("pending", Hooks.states().get("populateClasspath"));
+    }
+
+    @Test
+    void aRequesterHookThatRanCountsAsAMavenProjectRead() {
+        Hooks.inPlace("initParent", "loader");
+        Boot.requesterExit(Boot.initParentEnter(new Fakes.MavenProject(tmp.resolve("pom.xml").toFile())));
+        String err = Fakes.stderr(Hooks::shutdown);
+        assertTrue(err.contains("hook populateClasspath") && err.contains("never loaded by shutdown"), err);
+    }
+
     @Test
     void atShutdownNothingIsReportedWhenPopulateClasspathWasAdvised() {
         Hooks.inPlace("populateClasspath", "loader");
+        Hooks.mavenProjectRead();
         assertEquals("", Fakes.stderr(Hooks::shutdown), "advised but never called: the checkpoint's job, not shutdown's");
     }
 
     @Test
     void atShutdownNothingMoreIsReportedAfterTheCheckpoint() {
         Hooks.inPlace("getProjectName", "loader");
+        Hooks.mavenProjectRead();
         Hooks.inPlace("populateClasspath", "loader");
         Fakes.stderr(Hooks::checkpoint);
         assertEquals("", Fakes.stderr(Hooks::shutdown));

@@ -21,3 +21,6 @@ mise.local.toml
 # (planned, with Fractal Agent Tools)
 # .context/pipeline/
 # .agents/skills/fractal-agent-*
+
+# The governor's run folder (task-series-governor)
+temp/
